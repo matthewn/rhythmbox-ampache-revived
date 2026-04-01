@@ -143,7 +143,6 @@ class SongsHandler(xml.sax.handler.ContentHandler):
                                                         self.__db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, self.__size)
                                                 if self.__rating != -1:
                                                         self.__db.entry_set(entry, RB.RhythmDBPropType.RATING, self.__rating)
-                                                self.__db.commit()
 
                                                 if self.__art != '':
                                                         self.__albumart[self.__artist + self.__album] = self.__art
@@ -484,6 +483,10 @@ class AmpacheBrowser(RB.BrowserSource):
                                         parser.feed(contents)
                                 except xml.sax.SAXParseException as e:
                                         print("error parsing songs: %s" % e)
+
+                                # Commit all DB writes for this cache file in one batch
+                                if not is_playlist:
+                                        self.__db.commit()
 
                                 self.__text = None
                                 self.__busy = False

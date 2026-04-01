@@ -66,14 +66,16 @@ class PlaylistsHandler(xml.sax.handler.ContentHandler):
         def startElement(self, name, attrs):
                 if name == 'playlist':
                         self.__id = attrs['id']
+                        self.__name = ''
+                        self.__items = 0
+                        self.__owner = ''
+                        self.__type = ''
                 self.__text = ''
 
         def endElement(self, name):
                 if name == 'playlist':
-                        # only private with your user name or public
-                        # playlists should be considered
-                        if self.__owner == self.__user or \
-                                self.__type == 'public':
+                        # only private playlists owned by this user, or public ones
+                        if self.__owner == self.__user or self.__type == 'public':
                                 self.__playlists.append([
                                         self.__id,
                                         self.__name,

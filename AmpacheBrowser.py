@@ -646,11 +646,9 @@ class AmpacheBrowser(RB.BrowserSource):
                 # check for errors
                 if not self.__settings['url']:
                         edlg = Gtk.MessageDialog(
-                                None,
-                                0,
-                                Gtk.MessageType.ERROR,
-                                Gtk.ButtonsType.OK,
-                                _('URL missing'))
+                                message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.OK,
+                                text=_('URL missing'))
                         edlg.run()
                         edlg.destroy()
                         self.__activated = False
@@ -658,11 +656,9 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 if not self.__settings['password']:
                         edlg = Gtk.MessageDialog(
-                                None,
-                                0,
-                                Gtk.MessageType.ERROR,
-                                Gtk.ButtonsType.OK,
-                                _('Password missing'))
+                                message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.OK,
+                                text=_('Password missing'))
                         edlg.run()
                         edlg.destroy()
                         self.__activated = False
@@ -734,7 +730,7 @@ class AmpacheBrowser(RB.BrowserSource):
         def __album_art_requested(self, store, key, last_time):
                 artist = key.get_field('artist')
                 album = key.get_field('album')
-                uri = self.__albumart[artist + album]
+                uri = self.__albumart.get(artist + album)
                 print('album art uri: %s' % uri)
                 if uri:
                         storekey = RB.ExtDBKey.create_storage('album', album)
@@ -742,7 +738,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         store.store_uri(storekey, RB.ExtDBSourceType.SEARCH, uri)
 
         def do_get_status(self, text, busy):
-                return (self.__text, True)
+                return (self.__text, self.__busy)
 
         def clean_db(self):
                 # remove playlists

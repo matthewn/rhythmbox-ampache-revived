@@ -111,50 +111,53 @@ class SongsHandler(xml.sax.handler.ContentHandler):
                 self.__text = ''
 
         def endElement(self, name):
-                if self.__text:
-                        if name == 'song':
-                                try:
-                                        if self.__is_playlist:
-                                                self.__source.add_location(self.__url, -1)
-                                        else:
-                                                # add the track to the database if it doesn't exist
-                                                entry = self.__db.entry_lookup_by_location(self.__url)
-                                                if entry == None:
-                                                        entry = RB.RhythmDBEntry.new(self.__db, self.__entry_type, self.__url)
-                                                        self.__entries.append(entry)
+                # Process the song container unconditionally; only guard field elements
+                # on self.__text to avoid acting on empty/whitespace-only nodes.
+                if name == 'song':
+                        try:
+                                if self.__is_playlist:
+                                        self.__source.add_location(self.__url, -1)
+                                else:
+                                        # add the track to the database if it doesn't exist
+                                        entry = self.__db.entry_lookup_by_location(self.__url)
+                                        if entry is None:
+                                                entry = RB.RhythmDBEntry.new(
+                                                        self.__db, self.__entry_type, self.__url)
+                                                self.__entries.append(entry)
 
-                                                        if self.__artist != '':
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.ARTIST, self.__artist)
-                                                        if self.__album != '':
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.ALBUM, self.__album)
-                                                        if self.__title != '':
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.TITLE, self.__title)
-                                                        if self.__tag != '':
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.GENRE, self.__tag)
-                                                        if self.__track != -1:
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, self.__track)
-                                                        if self.__year != -1:
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.DATE, self.__year)
-                                                        if self.__time != -1:
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.DURATION, self.__time)
-                                                        if self.__size != -1:
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, self.__size)
-                                                        if self.__rating != -1:
-                                                                self.__db.entry_set(entry, RB.RhythmDBPropType.RATING, self.__rating)
-                                                        self.__db.commit()
+                                                if self.__artist != '':
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.ARTIST, self.__artist)
+                                                if self.__album != '':
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.ALBUM, self.__album)
+                                                if self.__title != '':
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.TITLE, self.__title)
+                                                if self.__tag != '':
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.GENRE, self.__tag)
+                                                if self.__track != -1:
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, self.__track)
+                                                if self.__year != -1:
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.DATE, self.__year)
+                                                if self.__time != -1:
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.DURATION, self.__time)
+                                                if self.__size != -1:
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, self.__size)
+                                                if self.__rating != -1:
+                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.RATING, self.__rating)
+                                                self.__db.commit()
 
-                                                        if self.__art != '':
-                                                                self.__albumart[self.__artist + self.__album] = self.__art
+                                                if self.__art != '':
+                                                        self.__albumart[self.__artist + self.__album] = self.__art
 
-                                except Exception as e: # This happens on duplicate uris being added
-                                        sys.excepthook(*sys.exc_info())
-                                        print("Couldn't add %s - %s" % (self.__artist, self.__title), e)
+                        except Exception as e: # This happens on duplicate uris being added
+                                sys.excepthook(*sys.exc_info())
+                                print("Couldn't add %s - %s" % (self.__artist, self.__title), e)
 
-                                self.__default()
+                        self.__default()
 
-                        elif name == 'url':
+                elif self.__text:
+                        if name == 'url':
                                 if self.__auth: # replace ssid string with new auth string
-                                        self.__text = re.sub(self.__re_auth, r'\1='+self.__auth, self.__text);
+                                        self.__text = re.sub(self.__re_auth, r'\1='+self.__auth, self.__text)
                                 self.__url = self.__text
                         elif name == 'artist':
                                 self.__artist = self.__text
@@ -177,7 +180,7 @@ class SongsHandler(xml.sax.handler.ContentHandler):
                                 self.__rating = int(self.__text)
                         elif name == 'art':
                                 if self.__auth: # replace auth string with new auth string
-                                        self.__text = re.sub(self.__re_auth, 'auth='+self.__auth, self.__text);
+                                        self.__text = re.sub(self.__re_auth, 'auth='+self.__auth, self.__text)
                                 self.__art = self.__text
 
         def characters(self, content):

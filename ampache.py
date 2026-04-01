@@ -25,7 +25,7 @@
 # along with the Rhythmbox Ampache plugin.  If not, see
 # <http://www.gnu.org/licenses/>.
 
-import rb
+import os
 from gi.repository import RB
 from gi.repository import GObject, Peas, Gtk, Gio, GdkPixbuf
 
@@ -55,9 +55,11 @@ class Ampache(GObject.Object, Peas.Activatable):
                 db = shell.props.db
 
                 # load icon
-                theme = Gtk.IconTheme.get_default()
                 what, width, height = Gtk.icon_size_lookup(Gtk.IconSize.LARGE_TOOLBAR)
-                icon = GdkPixbuf.Pixbuf.new_from_file_at_size(rb.find_plugin_file(self, 'ampache.ico'), width, height)
+                ico_path = os.path.join(self.plugin_info.get_data_dir(), 'ampache.ico')
+                if not os.path.exists(ico_path):
+                        ico_path = os.path.join(os.path.dirname(__file__), 'ampache.ico')
+                icon = GdkPixbuf.Pixbuf.new_from_file_at_size(ico_path, width, height) if os.path.exists(ico_path) else None
 
                 # register AmpacheEntryType
                 self.__entry_type = AmpacheEntryType()

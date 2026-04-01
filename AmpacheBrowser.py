@@ -763,11 +763,11 @@ class AmpacheBrowser(RB.BrowserSource):
                 for playlist_source in self.__playlist_sources:
                         # delete Playlist source
                         playlist_source.delete_thyself()
-                        playlist_source = None
+                self.__playlist_sources = []
+                self.__entries = []
 
                 self.__db.entry_delete_by_type(self.__entry_type)
                 self.__db.commit()
-                # self.__entries should be deleted, but here it's too soon, now it just grows on each update
 
         def refetch_ampache(self, parameter, user_data):
                 self.clean_db()
@@ -775,16 +775,32 @@ class AmpacheBrowser(RB.BrowserSource):
 
         def do_delete_thyself(self):
 
-                # delete source if active
                 if self.__activated:
                         self.__activated = False
 
-                        # disconnect from art store
-                        self.__art_store.disconnect(self.__art_request)
-                        self.__art_store = None
+                        # Cancel all pending async operations so their callbacks
+                        # see the False flag and return without touching GObjects.
+                        for cancel in self.__cancellables:
+                                cancel.cancel()
+                        self.__cancellables = []
 
-                        # remove all AmpacheEntryTypes from database
-                        self.clean_db()
+                        if self.__art_store is not None:
+                                self.__art_store.disconnect(self.__art_request)
+                                self.__art_store = None
+
+                        # Drop references.  Do NOT call playlist_source.delete_thyself()
+                        # here — Rhythmbox removes child display pages automatically when
+                        # the parent is deleted; doing it ourselves causes a double-free.
+                        #
+                        # Do NOT call entry_delete_by_type here either.  It emits
+                        # entry-deleted signals that Rhythmbox's rb_entry_view tries to
+                        # handle, but the entry view inside RBBrowserSource is already
+                        # invalid by the time do_delete_thyself is called, producing a
+                        # SIGSEGV in rb_entry_view_have_selection.  Since entries are
+                        # registered with save_to_disk=False they never persist to disk,
+                        # so skipping this call is safe on exit.
+                        self.__playlist_sources = []
+                        self.__entries = []
 
                 RB.BrowserSource.do_delete_thyself(self)
 

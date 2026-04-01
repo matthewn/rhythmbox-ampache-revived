@@ -86,8 +86,6 @@ class PlaylistsHandler(xml.sax.handler.ContentHandler):
                         self.__owner = self.__text
                 elif name == 'type':
                         self.__type = self.__text
-                else:
-                        self.__null = self.__text
 
         def characters(self, content):
                 self.__text = self.__text + content
@@ -179,8 +177,6 @@ class SongsHandler(xml.sax.handler.ContentHandler):
                                 if self.__auth: # replace auth string with new auth string
                                         self.__text = re.sub(self.__re_auth, 'auth='+self.__auth, self.__text);
                                 self.__art = self.__text
-                        else:
-                                self.__null = self.__text
 
         def characters(self, content):
                 self.__text = self.__text + content
@@ -198,7 +194,7 @@ class SongsHandler(xml.sax.handler.ContentHandler):
                 self.__size = -1
                 self.__rating = -1
                 self.__art = ''
- 
+
 class AmpachePlaylist(RB.StaticPlaylistSource):
         def __init__(self, **kwargs):
                 super(AmpachePlaylist, self).__init__(kwargs)

@@ -133,7 +133,7 @@ class SongsHandler(xml.sax.handler.ContentHandler):
                                                                 self.__db.entry_set(entry, RB.RhythmDBPropType.GENRE, self.__tag)
                                                         if self.__track != -1:
                                                                 self.__db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, self.__track)
-                                                        if self.__year:
+                                                        if self.__year != -1:
                                                                 self.__db.entry_set(entry, RB.RhythmDBPropType.DATE, self.__year)
                                                         if self.__time != -1:
                                                                 self.__db.entry_set(entry, RB.RhythmDBPropType.DURATION, self.__time)

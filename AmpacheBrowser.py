@@ -248,52 +248,49 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 def download_songs(uri, items, is_playlist, source, cache_filename, playlist_name):
 
-                        def cache_saved_cb(stream, result, data):
+                        if items <= 0:
+                                self.__text = None
+                                self.__busy = False
+                                self.notify_status_changed()
+                                download_iterate()
+                                return
+
+                        # Calculate all chunk offsets up front so we can fire
+                        # all requests simultaneously rather than sequentially.
+                        offsets = list(range(0, items, self.__limit))
+                        num_chunks = len(offsets)
+                        chunk_contents = [None] * num_chunks
+                        remaining = [num_chunks]
+                        songs_loaded = [0]
+                        aborted = [False]
+
+                        self.__text = 'Fetching %s... (0 / %d songs)' % (playlist_name, items)
+                        self.__busy = True
+                        self.notify_status_changed()
+
+                        def songs_downloaded_cb(session_obj, result, chunk_index):
+                                # Always call finish() to free the GLib result, even
+                                # when cancelled or when we intend to discard the data.
                                 try:
-                                        size = stream.write_bytes_finish(result)
+                                        contents = session_obj.send_and_read_finish(result).get_data()
                                 except Exception as e:
-                                        print("error writing file: %s" % (self.__songs_cache_filename))
-                                        sys.excepthook(*sys.exc_info())
-
-                                # close stream
-                                stream.close(Gio.Cancellable())
-
-                                # change modification time to newest time
-                                newest_time = int(mktime(self.__handshake_newest.timetuple()))
-                                os.utime(cache_filename, (newest_time, newest_time))
-
-                        def open_append_cb(file, result, data):
-                                try:
-                                        stream = file.append_to_finish(result)
-                                except Exception as e:
-                                        print("error opening file for writing %s" % (cache_filename))
-                                        sys.excepthook(*sys.exc_info())
-
-                                stream.write_bytes_async(
-                                        data,
-                                        GLib.PRIORITY_DEFAULT,
-                                        Gio.Cancellable(),
-                                        cache_saved_cb,
-                                        None)
-                                print("write to cache file: %s" % (cache_filename))
-
-                        def songs_downloaded_cb(file, result, data):
-                                try:
-                                        (ok, contents, etag) = file.load_contents_finish(result)
-                                except Exception as e:
-                                        edlg = Gtk.MessageDialog(
-                                                None,
-                                                0,
-                                                Gtk.MessageType.ERROR,
-                                                Gtk.ButtonsType.OK,
-                                                _('Songs response: %s') % e)
-                                        edlg.run()
-                                        edlg.destroy()
-                                        self.__activated = False
+                                        if self.__activated and not aborted[0]:
+                                                aborted[0] = True
+                                                edlg = Gtk.MessageDialog(
+                                                        message_type=Gtk.MessageType.ERROR,
+                                                        buttons=Gtk.ButtonsType.OK,
+                                                        text=_('Songs response: %s') % e)
+                                                edlg.run()
+                                                edlg.destroy()
+                                                self.__activated = False
+                                                self.__text = None
+                                                self.__busy = False
+                                                self.notify_status_changed()
+                                        return
+                                if aborted[0] or not self.__activated:
                                         return
 
-                                new_offset = data[0] + self.__limit
-
+                                print("parse chunk %s[%d]..." % (playlist_name, offsets[chunk_index]))
                                 # instantiate songs parser and parse XML
                                 parser = xml.sax.make_parser()
                                 parser.setContentHandler(SongsHandler(
@@ -304,66 +301,70 @@ class AmpacheBrowser(RB.BrowserSource):
                                         self.__albumart,
                                         self.__handshake_auth,
                                         self.__entries))
-
-                                print("parse chunk %s[%d]..." % (playlist_name, data[0]))
                                 try:
                                         parser.feed(contents)
                                 except xml.sax.SAXParseException as e:
                                         print("error parsing songs: %s: %s" %
                                                 (e, contents.decode('utf-8').split("\n")[e.getLineNumber()]))
 
-                                # get next chunk of move on to next playlist
-                                if new_offset < items:
-                                        # download subsequent chunk of songs
-                                        download_songs_chunk(new_offset, data[1])
-                                else:
-                                        # last chunk downloaded
-                                        # change progress to 100%
-                                        self.__text = None
-                                        self.__busy = False
-                                        self.notify_status_changed()
+                                # Commit and update the UI after each chunk so songs
+                                # appear progressively rather than all at once.
+                                if not is_playlist:
+                                        self.__db.commit()
+                                songs_loaded[0] += min(self.__limit, items - offsets[chunk_index])
+                                self.__text = 'Fetching %s... (%d / %d songs)' % (
+                                        playlist_name, min(songs_loaded[0], items), items)
+                                self.notify_status_changed()
 
-                                        # process next playlist
-                                        download_iterate()
+                                chunk_contents[chunk_index] = contents
+                                remaining[0] -= 1
 
-                                # remove enveloping <?xml> and <root> tags
-                                # as needed to regenerate one full .xml
-                                lines = contents.decode('utf-8').splitlines(True)
-                                if data[0] > 0:
-                                        del lines[:2]
-                                if new_offset < items:
-                                        del lines[-2:]
+                                if remaining[0] == 0:
+                                        all_chunks_done()
 
-                                # append to cache file
-                                print("write chunk %s[%d] to file..." % (playlist_name, data[0]))
-                                data[1].append_to_async(
-                                        Gio.FileCreateFlags.NONE,
-                                        GLib.PRIORITY_DEFAULT,
-                                        Gio.Cancellable(),
-                                        open_append_cb,
-                                        GLib.Bytes.new(''.join(lines).encode('utf-8')))
+                        def all_chunks_done():
 
-                        def download_songs_chunk(offset, cache_file):
-                                ampache_server_uri = ''.join([uri,
+                                # Remove enveloping <?xml> and <root> tags from intermediate
+                                # chunks as needed to reassemble all chunks into one full .xml.
+                                lines = []
+                                for i, contents in enumerate(chunk_contents):
+                                        chunk_lines = contents.decode('utf-8').splitlines(True)
+                                        if i > 0:
+                                                del chunk_lines[:2]   # strip <?xml?> and opening root tag
+                                        if i < num_chunks - 1:
+                                                del chunk_lines[-2:]  # strip closing root tag
+                                        lines.extend(chunk_lines)
+
+                                try:
+                                        with open(cache_filename, 'wb') as f:
+                                                f.write(''.join(lines).encode('utf-8'))
+                                        newest_time = int(mktime(self.__handshake_newest.timetuple()))
+                                        # change modification time to newest time
+                                        os.utime(cache_filename, (newest_time, newest_time))
+                                        print("wrote cache file: %s" % cache_filename)
+                                except Exception as e:
+                                        print("error writing cache %s: %s" % (cache_filename, e))
+
+                                self.__text = None
+                                self.__busy = False
+                                self.notify_status_changed()
+                                download_iterate()
+
+                        # Fire all chunk requests in parallel via Soup so the
+                        # per-host connection limit applies to our session, not GIO's.
+                        for i, offset in enumerate(offsets):
+                                chunk_uri = ''.join([uri,
                                         '&offset=%s&limit=%s' % (offset, self.__limit)])
-                                ampache_server_file = Gio.file_new_for_uri(ampache_server_uri)
-                                ampache_server_file.load_contents_async(
-                                        Gio.Cancellable(),
+                                cancel = Gio.Cancellable()
+                                self.__cancellables.append(cancel)
+                                self.__session.send_and_read_async(
+                                        Soup.Message.new('GET', chunk_uri),
+                                        GLib.PRIORITY_DEFAULT,
+                                        cancel,
                                         songs_downloaded_cb,
-                                        (offset, cache_file))
+                                        i)
                                 print("download %s[%d]: %s" %
-                                        (playlist_name, offset, ampache_server_uri))
-
-                        self.__text = 'Download %s from Ampache server...' % (playlist_name)
-                        self.__busy = True
-                        self.notify_status_changed()
-
-                        cache_file = Gio.file_new_for_path(cache_filename)
-
-#                        cache_file = open(cache_filename, 'wt', encoding='utf-8')
-
-                        # download first chunk of songs
-                        download_songs_chunk(0, cache_file)
+                                        (playlist_name, offset, chunk_uri))
 
                 def download_iterate():
                         try:

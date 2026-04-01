@@ -223,8 +223,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         ''.join([self.__songs_cache, '.xml']))
                 self.__settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
                 self.__albumart = {}
-                self.__playlists = collections.deque(
-                        [[0, self.__songs_cache]])
+                self.__playlists = collections.deque()
                 self.__caches = collections.deque()
                 self.__playlist_sources = []
                 self.__entries = []
@@ -243,6 +242,12 @@ class AmpacheBrowser(RB.BrowserSource):
                 app.add_action(action)
 
         def update(self, force_download):
+
+                # Reset the playlist queue for this update cycle.  Without this,
+                # any un-consumed entry left from a cache-load path (which never
+                # calls download_iterate) would accumulate across calls and cause
+                # songs to be fetched multiple times.
+                self.__playlists = collections.deque([[0, self.__songs_cache]])
 
                 ### download songs from Ampache server
 
@@ -551,6 +556,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                 return
 
                 def enumerate_cache_files():
+                        self.__caches = collections.deque()
                         for filename in os.listdir(
                                 os.path.join(RB.user_cache_dir(), 'ampache')):
                                 name = os.path.splitext(filename)[0]

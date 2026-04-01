@@ -26,7 +26,9 @@
 # <http://www.gnu.org/licenses/>.
 
 from gi.repository import RB
-from gi.repository import GObject, Gtk, Gio, GLib
+import gi
+gi.require_version('Soup', '3.0')
+from gi.repository import GObject, Gtk, Gio, GLib, Soup
 
 import faulthandler
 faulthandler.enable()
@@ -226,6 +228,8 @@ class AmpacheBrowser(RB.BrowserSource):
                 self.__caches = collections.deque()
                 self.__playlist_sources = []
                 self.__entries = []
+                self.__cancellables = []
+                self.__session = Soup.Session(max_conns_per_host=20)
 
                 self.__text = None
                 self.__busy = False
@@ -412,28 +416,27 @@ class AmpacheBrowser(RB.BrowserSource):
                                 return
 
 
-                def playlists_cb(file, result, param):
+                def playlists_cb(session_obj, result, param):
                         try:
-                                (ok, contents, etag) = file.load_contents_finish(result)
+                                contents = session_obj.send_and_read_finish(result).get_data()
                         except Exception as e:
-                                edlg = Gtk.MessageDialog(
-                                        None,
-                                        0,
-                                        Gtk.MessageType.ERROR,
-                                        Gtk.ButtonsType.OK,
-                                        _('Playlists response: %s') % e)
-                                edlg.run()
-                                edlg.destroy()
-                                self.__activated = False
+                                if self.__activated:
+                                        edlg = Gtk.MessageDialog(
+                                                message_type=Gtk.MessageType.ERROR,
+                                                buttons=Gtk.ButtonsType.OK,
+                                                text=_('Playlists response: %s') % e)
+                                        edlg.run()
+                                        edlg.destroy()
+                                        self.__activated = False
+                                return
+                        if not self.__activated:
                                 return
 
                         if len(contents) <= 0:
                                 edlg = Gtk.MessageDialog(
-                                        None,
-                                        0,
-                                        Gtk.MessageType.ERROR,
-                                        Gtk.ButtonsType.OK,
-                                        _("Playlists response size: 0\nCheck ampache server logs for cause."))
+                                        message_type=Gtk.MessageType.ERROR,
+                                        buttons=Gtk.ButtonsType.OK,
+                                        text=_("Playlists response size: 0\nCheck ampache server logs for cause."))
                                 edlg.run()
                                 edlg.destroy()
                                 self.__activated = False
@@ -462,9 +465,12 @@ class AmpacheBrowser(RB.BrowserSource):
                                 try:
                                         (ok, contents, etag) = file.load_contents_finish(result)
                                 except Exception as e:
-                                        RB.error_dialog(
-                                                title=_("Unable to load songs"),
-                                                message=_("Rhythmbox could not load the Ampache songs."))
+                                        if self.__activated:
+                                                RB.error_dialog(
+                                                        title=_("Unable to load songs"),
+                                                        message=_("Rhythmbox could not load the Ampache songs."))
+                                        return
+                                if not self.__activated:
                                         return
 
                                 try:
@@ -499,9 +505,10 @@ class AmpacheBrowser(RB.BrowserSource):
                         self.__busy = True
                         self.notify_status_changed()
 
-                        cache_file = Gio.file_new_for_path(filename)
-                        cache_file.load_contents_async(
-                                Gio.Cancellable(),
+                        cancel = Gio.Cancellable()
+                        self.__cancellables.append(cancel)
+                        Gio.file_new_for_path(filename).load_contents_async(
+                                cancel,
                                 songs_loaded_cb,
                                 None)
 
@@ -556,28 +563,27 @@ class AmpacheBrowser(RB.BrowserSource):
                         # start processing first cache
                         load_iterate()
 
-                def handshake_cb(file, result, parser):
+                def handshake_cb(session_obj, result, parser):
                         try:
-                                (ok, contents, etag) = file.load_contents_finish(result)
+                                contents = session_obj.send_and_read_finish(result).get_data()
                         except Exception as e:
-                                edlg = Gtk.MessageDialog(
-                                        None,
-                                        0,
-                                        Gtk.MessageType.ERROR,
-                                        Gtk.ButtonsType.OK,
-                                        _('Handshake response: %s') % e)
-                                edlg.run()
-                                edlg.destroy()
-                                self.__activated = False
+                                if self.__activated:
+                                        edlg = Gtk.MessageDialog(
+                                                message_type=Gtk.MessageType.ERROR,
+                                                buttons=Gtk.ButtonsType.OK,
+                                                text=_('Handshake response: %s') % e)
+                                        edlg.run()
+                                        edlg.destroy()
+                                        self.__activated = False
+                                return
+                        if not self.__activated:
                                 return
 
                         if len(contents) <= 0:
                                 edlg = Gtk.MessageDialog(
-                                        None,
-                                        0,
-                                        Gtk.MessageType.ERROR,
-                                        Gtk.ButtonsType.OK,
-                                        _("Handshake response size: 0\nCheck ampache server logs for cause."))
+                                        message_type=Gtk.MessageType.ERROR,
+                                        buttons=Gtk.ButtonsType.OK,
+                                        text=_("Handshake response size: 0\nCheck ampache server logs for cause."))
                                 edlg.run()
                                 edlg.destroy()
                                 self.__activated = False
@@ -635,10 +641,12 @@ class AmpacheBrowser(RB.BrowserSource):
                                         '%s/server/xml.server.php?action=playlists&auth=%s' % \
                                         (self.__settings['url'],
                                         self.__handshake_auth)
-                                ampache_server_file = \
-                                        Gio.file_new_for_uri(ampache_server_uri)
-                                ampache_server_file.load_contents_async(
-                                        Gio.Cancellable(),
+                                cancel = Gio.Cancellable()
+                                self.__cancellables.append(cancel)
+                                self.__session.send_and_read_async(
+                                        Soup.Message.new('GET', ampache_server_uri),
+                                        GLib.PRIORITY_DEFAULT,
+                                        cancel,
                                         playlists_cb,
                                         None)
                                 print("downloading playlists: %s" % (ampache_server_uri))
@@ -695,9 +703,12 @@ class AmpacheBrowser(RB.BrowserSource):
 
 
                 # execute handshake
-                ampache_server_file = Gio.file_new_for_uri(ampache_server_uri)
-                ampache_server_file.load_contents_async(
-                        Gio.Cancellable(),
+                cancel = Gio.Cancellable()
+                self.__cancellables.append(cancel)
+                self.__session.send_and_read_async(
+                        Soup.Message.new('GET', ampache_server_uri),
+                        GLib.PRIORITY_DEFAULT,
+                        cancel,
                         handshake_cb,
                         parser)
                 print("downloading handshake: %s" % (ampache_server_uri))

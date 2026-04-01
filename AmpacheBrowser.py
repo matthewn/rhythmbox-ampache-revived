@@ -199,14 +199,14 @@ class SongsHandler(xml.sax.handler.ContentHandler):
 
 class AmpachePlaylist(RB.StaticPlaylistSource):
         def __init__(self, **kwargs):
-                super(AmpachePlaylist, self).__init__(kwargs)
+                super(AmpachePlaylist, self).__init__(**kwargs)
 
 GObject.type_register(AmpachePlaylist)
 
 class AmpacheBrowser(RB.BrowserSource):
 
         def __init__(self, **kwargs):
-                super(AmpacheBrowser, self).__init__(kwargs)
+                super(AmpacheBrowser, self).__init__(**kwargs)
 
                 self.__limit = 5000
 

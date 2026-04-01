@@ -28,6 +28,9 @@
 from gi.repository import RB
 from gi.repository import GObject, Gtk, Gio, GLib
 
+import faulthandler
+faulthandler.enable()
+
 import time
 from time import mktime
 from datetime import datetime

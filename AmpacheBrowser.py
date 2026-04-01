@@ -208,7 +208,7 @@ class AmpacheBrowser(RB.BrowserSource):
         def __init__(self, **kwargs):
                 super(AmpacheBrowser, self).__init__(**kwargs)
 
-                self.__limit = 5000
+                self.__limit = 500
 
                 self.__songs_cache = '_songs'
                 self.__cache_directory = os.path.join(

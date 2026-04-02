@@ -514,41 +514,40 @@ class AmpacheBrowser(RB.BrowserSource):
                                 None)
 
                 def load_iterate():
-                        try:
-                                cache = self._caches.popleft()
-
-                                print(f'process playlist: {cache}')
-
-                                if cache == self._songs_cache:
-                                        load_songs(
-                                                self._songs_cache_filename,
-                                                False,
-                                                self)
-                                else:
-                                        # create AmpachePlaylist source
-                                        playlist_source = GObject.new(
-                                                AmpachePlaylist,
-                                                is_local=False,
-                                                shell=self._shell,
-                                                entry_type=self._entry_type,
-                                                name=_(cache)
-                                        )
-                                        self._playlist_sources.append(playlist_source)
-
-                                        # insert AmpachePlaylist source into AmpacheBrowser source
-                                        self._shell.append_display_page(playlist_source, self)
-
-                                        load_songs(
-                                                os.path.join(
-                                                        self._cache_directory,
-                                                        f"{cache}.xml"),
-                                                True,
-                                                playlist_source)
-
-                        except Exception as e:
+                        if not self._caches:
                                 print('no more playlists to process, refilter display page model')
                                 self._shell.props.display_page_model.refilter()
                                 return
+
+                        cache = self._caches.popleft()
+
+                        print(f'process playlist: {cache}')
+
+                        if cache == self._songs_cache:
+                                load_songs(
+                                        self._songs_cache_filename,
+                                        False,
+                                        self)
+                        else:
+                                # create AmpachePlaylist source
+                                playlist_source = GObject.new(
+                                        AmpachePlaylist,
+                                        is_local=False,
+                                        shell=self._shell,
+                                        entry_type=self._entry_type,
+                                        name=_(cache)
+                                )
+                                self._playlist_sources.append(playlist_source)
+
+                                # insert AmpachePlaylist source into AmpacheBrowser source
+                                self._shell.append_display_page(playlist_source, self)
+
+                                load_songs(
+                                        os.path.join(
+                                                self._cache_directory,
+                                                f"{cache}.xml"),
+                                        True,
+                                        playlist_source)
 
                 def enumerate_cache_files():
                         self._caches = collections.deque()

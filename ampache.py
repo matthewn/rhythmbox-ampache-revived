@@ -82,8 +82,6 @@ class Ampache(GObject.Object, Peas.Activatable):
                         toolbar_menu=menu,
                         name=_("Ampache")
                 )
-                self._first = 1
-
                 # assign AmpacheEntryType to AmpacheBrowser source
                 shell.register_entry_type_for_source(
                         self._source,

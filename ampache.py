@@ -55,7 +55,7 @@ class Ampache(GObject.Object, Peas.Activatable):
                 db = shell.props.db
 
                 # load icon
-                _, width, height = Gtk.icon_size_lookup(Gtk.IconSize.LARGE_TOOLBAR)
+                _ok, width, height = Gtk.icon_size_lookup(Gtk.IconSize.LARGE_TOOLBAR)
                 ico_path = os.path.join(self.plugin_info.get_data_dir(), 'ampache.ico')
                 if not os.path.exists(ico_path):
                         ico_path = os.path.join(os.path.dirname(__file__), 'ampache.ico')

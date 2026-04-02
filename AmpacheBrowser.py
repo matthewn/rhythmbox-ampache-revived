@@ -226,7 +226,7 @@ class AmpacheBrowser(RB.BrowserSource):
                 self._caches = collections.deque()
                 self._playlist_sources = []
                 self._entries = []
-                self._cancellables = []
+                self._cancellables = set()
                 self._session = Soup.Session(max_conns_per_host=20)
 
                 self._shell = None
@@ -281,8 +281,10 @@ class AmpacheBrowser(RB.BrowserSource):
                         self._busy = True
                         self.notify_status_changed()
 
-                        def songs_downloaded_cb(session_obj, result, chunk_index):
+                        def songs_downloaded_cb(session_obj, result, user_data):
                                 nonlocal aborted, remaining, songs_loaded
+                                cancel, chunk_index = user_data
+                                self._cancellables.discard(cancel)
                                 # Always call finish() to free the GLib result, even
                                 # when cancelled or when we intend to discard the data.
                                 try:
@@ -368,13 +370,13 @@ class AmpacheBrowser(RB.BrowserSource):
                         for i, offset in enumerate(offsets):
                                 chunk_uri = f"{uri}&offset={offset}&limit={self._limit}"
                                 cancel = Gio.Cancellable()
-                                self._cancellables.append(cancel)
+                                self._cancellables.add(cancel)
                                 self._session.send_and_read_async(
                                         Soup.Message.new('GET', chunk_uri),
                                         GLib.PRIORITY_DEFAULT,
                                         cancel,
                                         songs_downloaded_cb,
-                                        i)
+                                        (cancel, i))
                                 print(f"download {playlist_name}[{offset}]: {chunk_uri}")
 
                 def download_iterate():
@@ -426,7 +428,8 @@ class AmpacheBrowser(RB.BrowserSource):
                                 return
 
 
-                def playlists_cb(session_obj, result, param):
+                def playlists_cb(session_obj, result, cancel):
+                        self._cancellables.discard(cancel)
                         try:
                                 contents = session_obj.send_and_read_finish(result).get_data()
                         except Exception as e:
@@ -471,7 +474,8 @@ class AmpacheBrowser(RB.BrowserSource):
                 ### load songs from cache
 
                 def load_songs(filename, is_playlist, source):
-                        def songs_loaded_cb(file, result, data):
+                        def songs_loaded_cb(file, result, cancel):
+                                self._cancellables.discard(cancel)
                                 try:
                                         (ok, contents, etag) = file.load_contents_finish(result)
                                 except Exception as e:
@@ -516,11 +520,11 @@ class AmpacheBrowser(RB.BrowserSource):
                         self.notify_status_changed()
 
                         cancel = Gio.Cancellable()
-                        self._cancellables.append(cancel)
+                        self._cancellables.add(cancel)
                         Gio.file_new_for_path(filename).load_contents_async(
                                 cancel,
                                 songs_loaded_cb,
-                                None)
+                                cancel)
 
                 def load_iterate():
                         if not self._caches:
@@ -573,7 +577,9 @@ class AmpacheBrowser(RB.BrowserSource):
                         # start processing first cache
                         load_iterate()
 
-                def handshake_cb(session_obj, result, parser):
+                def handshake_cb(session_obj, result, user_data):
+                        cancel, parser = user_data
+                        self._cancellables.discard(cancel)
                         try:
                                 contents = session_obj.send_and_read_finish(result).get_data()
                         except Exception as e:
@@ -651,13 +657,13 @@ class AmpacheBrowser(RB.BrowserSource):
                                         f"{self._settings['url']}/server/xml.server.php"
                                         f"?action=playlists&auth={self._handshake_auth}")
                                 cancel = Gio.Cancellable()
-                                self._cancellables.append(cancel)
+                                self._cancellables.add(cancel)
                                 self._session.send_and_read_async(
                                         Soup.Message.new('GET', ampache_server_uri),
                                         GLib.PRIORITY_DEFAULT,
                                         cancel,
                                         playlists_cb,
-                                        None)
+                                        cancel)
                                 print(f"downloading playlists: {ampache_server_uri}")
 
                 # check for errors
@@ -709,13 +715,13 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 # execute handshake
                 cancel = Gio.Cancellable()
-                self._cancellables.append(cancel)
+                self._cancellables.add(cancel)
                 self._session.send_and_read_async(
                         Soup.Message.new('GET', ampache_server_uri),
                         GLib.PRIORITY_DEFAULT,
                         cancel,
                         handshake_cb,
-                        parser)
+                        (cancel, parser))
                 print(f"downloading handshake: {ampache_server_uri}")
 
         # Source is activated
@@ -778,7 +784,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         # see the False flag and return without touching GObjects.
                         for cancel in self._cancellables:
                                 cancel.cancel()
-                        self._cancellables = []
+                        self._cancellables = set()
 
                         if self._art_store is not None:
                                 self._art_store.disconnect(self._art_request)

@@ -46,7 +46,7 @@ sys.modules['gi.repository'] = _gi_repository
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from AmpacheBrowser import (
+from AmpacheBrowser import (  # noqa: E402
     HandshakeHandler, PlaylistsHandler, SongsHandler,
     songs_to_rhythmdb, _open_db, _read_meta, _write_meta,
     _INSERT_SONG_SQL, _INSERT_PLAYLIST_SQL, _INSERT_PLAYLIST_SONG_SQL,
@@ -369,10 +369,10 @@ _SONG_DICTS = [
         'album':  '',
         'title':  'Minimal',
         'tag':    '',
-        'track':  -1,
-        'year':   -1,
-        'time':   -1,
-        'size':   -1,
+        'track': -1,
+        'year': -1,
+        'time': -1,
+        'size': -1,
         'rating': -1,
         'art':    '',
     },
@@ -517,9 +517,9 @@ _CACHE_SONGS = [
         'title':  'Second Song',
         'tag':    '',
         'track':  2,
-        'year':   -1,
+        'year': -1,
         'time':   210,
-        'size':   -1,
+        'size': -1,
         'rating': -1,
         'art':    '',
     },
@@ -698,13 +698,13 @@ class TestMeta(unittest.TestCase):
         self.assertEqual(_read_meta(self.conn, 'last_clean'), 'second')
 
     def test_multiple_keys_independent(self):
-        _write_meta(self.conn, 'last_add',    'add_val')
+        _write_meta(self.conn, 'last_add', 'add_val')
         _write_meta(self.conn, 'last_update', 'update_val')
-        _write_meta(self.conn, 'last_clean',  'clean_val')
+        _write_meta(self.conn, 'last_clean', 'clean_val')
         self.conn.commit()
-        self.assertEqual(_read_meta(self.conn, 'last_add'),    'add_val')
+        self.assertEqual(_read_meta(self.conn, 'last_add'), 'add_val')
         self.assertEqual(_read_meta(self.conn, 'last_update'), 'update_val')
-        self.assertEqual(_read_meta(self.conn, 'last_clean'),  'clean_val')
+        self.assertEqual(_read_meta(self.conn, 'last_clean'), 'clean_val')
 
     def test_meta_persists_across_connections(self):
         _write_meta(self.conn, 'last_add', 'persistent')

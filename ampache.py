@@ -29,8 +29,12 @@ import os
 from gi.repository import RB
 from gi.repository import GObject, Peas, Gtk, Gio, GdkPixbuf
 
-from AmpacheConfigDialog import AmpacheConfigDialog
+from AmpacheConfigDialog import AmpacheConfigDialog  # noqa: F401 (Peas discovers this class by name)
 from AmpacheBrowser import AmpacheBrowser
+
+# _ is injected as a builtin by Rhythmbox's plugin loader at runtime.
+_ = str
+
 
 class AmpacheEntryType(RB.RhythmDBEntryType):
     def __init__(self):
@@ -86,7 +90,6 @@ class Ampache(GObject.Object, Peas.Activatable):
         shell.register_entry_type_for_source(
             self._source,
             self._entry_type)
-
 
         # insert AmpacheBrowser source into Shared group
         shell.append_display_page(

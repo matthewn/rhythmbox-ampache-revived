@@ -27,6 +27,7 @@
 import rb
 from gi.repository import GObject, Gtk, Gio, PeasGtk
 
+
 class AmpacheConfigDialog(GObject.Object, PeasGtk.Configurable):
     __gtype_name__ = 'AmpacheConfigDialog'
     object = GObject.property(type=GObject.Object)

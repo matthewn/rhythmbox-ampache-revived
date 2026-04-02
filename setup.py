@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
 from distutils.core import setup
-from distutils.sysconfig import PREFIX
 from distutils.command.install_data import install_data
 import os
 import sys
+
 
 class post_install(install_data):
     def run(self):
@@ -14,6 +14,7 @@ class post_install(install_data):
         if glib_compile_schemas:
             # Execute commands after copying
             os.system('glib-compile-schemas %s/share/glib-2.0/schemas' % self.install_dir)
+
 
 # determine lib path depending on architecture
 if (os.uname()[4].find('64') != -1 or os.uname()[4].find('s390x') != -1):
@@ -37,7 +38,7 @@ setup(name="rhythmbox-ampache",
       url="http://code.google.com/p/rhythmbox-ampache",
       packages=[],
       data_files=[
-          (lib_dir+"/rhythmbox/plugins/ampache", ["ampache.plugin", "ampache.py", "AmpacheBrowser.py", "AmpacheConfigDialog.py"]),
+          (lib_dir + "/rhythmbox/plugins/ampache", ["ampache.plugin", "ampache.py", "AmpacheBrowser.py", "AmpacheConfigDialog.py"]),
           ("share/rhythmbox/plugins/ampache", ["ampache-prefs.ui", "ampache.ico", "ampache.png"]),
           ("share/glib-2.0/schemas", ["org.gnome.rhythmbox.plugins.ampache.gschema.xml"]),
           ],

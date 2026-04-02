@@ -25,25 +25,28 @@
 # along with the Rhythmbox Ampache plugin.  If not, see
 # <http://www.gnu.org/licenses/>.
 
-import gi
-gi.require_version('Soup', '3.0')
-from gi.repository import RB
-from gi.repository import GObject, Gtk, Gio, GLib, Soup
-
+import collections
 import faulthandler
-faulthandler.enable()
-
-import time
-from datetime import datetime
-import re
 import hashlib
 import os
-import sys
+import re
 import sqlite3
-import collections
-
+import sys
+import time
 import xml.sax
 import xml.sax.handler
+from datetime import datetime
+
+import gi
+gi.require_version('Soup', '3.0')
+from gi.repository import GLib, GObject, Gtk, Gio, Soup  # noqa: E402
+from gi.repository import RB  # noqa: E402
+
+faulthandler.enable()
+
+# _ is injected as a builtin by Rhythmbox's plugin loader at runtime.
+# This stub satisfies static analysers and degrades gracefully elsewhere.
+_ = str
 
 # ---------------------------------------------------------------------------
 # SQLite schema and helpers
@@ -178,6 +181,7 @@ class HandshakeHandler(xml.sax.handler.ContentHandler):
     def characters(self, content):
         self._text = self._text + content
 
+
 class PlaylistsHandler(xml.sax.handler.ContentHandler):
     def __init__(self, playlists, user):
         super().__init__()
@@ -212,6 +216,7 @@ class PlaylistsHandler(xml.sax.handler.ContentHandler):
 
     def characters(self, content):
         self._text = self._text + content
+
 
 class SongsHandler(xml.sax.handler.ContentHandler):
     """Parse an Ampache songs XML response into a list of song dicts.
@@ -313,14 +318,16 @@ class AmpachePlaylist(RB.StaticPlaylistSource):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+
 GObject.type_register(AmpachePlaylist)
+
 
 class AmpacheBrowser(RB.BrowserSource):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        self._limit = 500
+        self._limit = 750
 
         self._cache_directory = os.path.join(RB.user_cache_dir(), 'ampache')
         self._db_filename = os.path.join(self._cache_directory, '_ampache.sqlite')
@@ -359,7 +366,7 @@ class AmpacheBrowser(RB.BrowserSource):
         # across calls and cause songs to be fetched multiple times.
         self._playlists = collections.deque([[0, 'library']])
 
-        ### download songs from Ampache server
+        # download songs from Ampache server
 
         # conn is opened in playlists_cb (when we know a full download is needed)
         # and closed in download_iterate (when the queue is exhausted).
@@ -510,9 +517,9 @@ class AmpacheBrowser(RB.BrowserSource):
                 else:
                     # All playlists downloaded — write meta, seal the cache, and finish.
                     newest_time = int(time.mktime(self._handshake_newest.timetuple()))
-                    _write_meta(conn, 'last_add',    handshake['add'])
+                    _write_meta(conn, 'last_add', handshake['add'])
                     _write_meta(conn, 'last_update', handshake['update'])
-                    _write_meta(conn, 'last_clean',  handshake['clean'])
+                    _write_meta(conn, 'last_clean', handshake['clean'])
                     conn.commit()
                     conn.close()
                     conn = None
@@ -525,7 +532,6 @@ class AmpacheBrowser(RB.BrowserSource):
             except Exception as e:
                 print(f'Exception: {e}')
                 return
-
 
         def playlists_cb(session_obj, result, cancel):
             nonlocal conn
@@ -574,7 +580,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
             download_iterate()
 
-        ### load library from SQLite cache
+        # load library from SQLite cache
 
         def load_from_cache():
             self._text = 'Loading from cache...'
@@ -624,7 +630,7 @@ class AmpacheBrowser(RB.BrowserSource):
             self.notify_status_changed()
             self._shell.props.display_page_model.refilter()
 
-        ### incremental update (add/update timestamps changed, clean unchanged)
+        # incremental update (add/update timestamps changed, clean unchanged)
 
         def incremental_update(new_add, new_update, new_clean, stored_add, stored_update):
             """Fetch only songs added/updated since the last sync, then diff playlists."""
@@ -815,9 +821,9 @@ class AmpacheBrowser(RB.BrowserSource):
 
             def finish_incremental():
                 nonlocal _conn
-                _write_meta(_conn, 'last_add',    new_add)
+                _write_meta(_conn, 'last_add', new_add)
                 _write_meta(_conn, 'last_update', new_update)
-                _write_meta(_conn, 'last_clean',  new_clean)
+                _write_meta(_conn, 'last_clean', new_clean)
                 _conn.commit()
                 newest_time = int(time.mktime(self._handshake_newest.timetuple()))
                 _conn.close()
@@ -832,7 +838,7 @@ class AmpacheBrowser(RB.BrowserSource):
             # Kick off: load existing cache into RhythmDB first so the
             # user sees their library immediately, then fetch the delta.
             load_from_cache()
-            self._text = 'Updating library...'
+            self._text = 'Checking for library updates...'
             self._busy = True
             self.notify_status_changed()
             run_next_delta()
@@ -892,17 +898,17 @@ class AmpacheBrowser(RB.BrowserSource):
             self._handshake_auth = handshake['auth']
             self._handshake_songs = int(handshake['songs'])
 
-            new_add   = handshake['add']
+            new_add = handshake['add']
             new_update = handshake['update']
-            new_clean  = handshake['clean']
+            new_clean = handshake['clean']
 
             # Read stored timestamps from the meta table (if the db exists)
             stored_add = stored_update = stored_clean = None
             if os.path.exists(self._db_filename):
                 _meta_conn = _open_db(self._db_filename)
-                stored_add   = _read_meta(_meta_conn, 'last_add')
+                stored_add = _read_meta(_meta_conn, 'last_add')
                 stored_update = _read_meta(_meta_conn, 'last_update')
-                stored_clean  = _read_meta(_meta_conn, 'last_clean')
+                stored_clean = _read_meta(_meta_conn, 'last_clean')
                 _meta_conn.close()
 
             # Three-way decision:
@@ -1084,5 +1090,6 @@ class AmpacheBrowser(RB.BrowserSource):
             self._entries = []
 
         RB.BrowserSource.do_delete_thyself(self)
+
 
 GObject.type_register(AmpacheBrowser)

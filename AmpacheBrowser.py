@@ -34,7 +34,6 @@ import faulthandler
 faulthandler.enable()
 
 import time
-from time import mktime
 from datetime import datetime
 import re
 import hashlib
@@ -343,7 +342,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                 try:
                                         with open(cache_filename, 'wb') as f:
                                                 f.write(''.join(lines).encode('utf-8'))
-                                        newest_time = int(mktime(self._handshake_newest.timetuple()))
+                                        newest_time = int(time.mktime(self._handshake_newest.timetuple()))
                                         # change modification time to newest time
                                         os.utime(cache_filename, (newest_time, newest_time))
                                         print(f"wrote cache file: {cache_filename}")

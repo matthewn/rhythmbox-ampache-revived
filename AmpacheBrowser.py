@@ -229,6 +229,15 @@ class AmpacheBrowser(RB.BrowserSource):
                 self._cancellables = []
                 self._session = Soup.Session(max_conns_per_host=20)
 
+                self._shell = None
+                self._db = None
+                self._entry_type = None
+                self._art_store = None
+                self._art_request = None
+                self._handshake_auth = None
+                self._handshake_newest = None
+                self._handshake_songs = None
+
                 self._text = None
                 self._busy = False
 

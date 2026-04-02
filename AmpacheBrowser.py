@@ -370,7 +370,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 def download_iterate():
                         try:
-                                if len(self._playlists) > 0:
+                                if self._playlists:
                                         playlist = self._playlists.popleft()
                                         print(f'process playlist: {playlist[1]}')
                                         if playlist[0] == 0:
@@ -433,7 +433,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         if not self._activated:
                                 return
 
-                        if len(contents) <= 0:
+                        if not contents:
                                 edlg = Gtk.MessageDialog(
                                         message_type=Gtk.MessageType.ERROR,
                                         buttons=Gtk.ButtonsType.OK,
@@ -581,7 +581,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         if not self._activated:
                                 return
 
-                        if len(contents) <= 0:
+                        if not contents:
                                 edlg = Gtk.MessageDialog(
                                         message_type=Gtk.MessageType.ERROR,
                                         buttons=Gtk.ButtonsType.OK,

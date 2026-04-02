@@ -47,7 +47,7 @@ import xml.sax.handler
 
 class HandshakeHandler(xml.sax.handler.ContentHandler):
         def __init__(self, handshake):
-                xml.sax.handler.ContentHandler.__init__(self)
+                super().__init__()
                 self.__handshake = handshake
 
         def startElement(self, name, attrs):
@@ -61,7 +61,7 @@ class HandshakeHandler(xml.sax.handler.ContentHandler):
 
 class PlaylistsHandler(xml.sax.handler.ContentHandler):
         def __init__(self, playlists, user):
-                xml.sax.handler.ContentHandler.__init__(self)
+                super().__init__()
                 self.__playlists = playlists
                 self.__user = user
 
@@ -96,7 +96,7 @@ class PlaylistsHandler(xml.sax.handler.ContentHandler):
 
 class SongsHandler(xml.sax.handler.ContentHandler):
         def __init__(self, is_playlist, source, db, entry_type, albumart, auth, entries):
-                xml.sax.handler.ContentHandler.__init__(self)
+                super().__init__()
                 self.__is_playlist = is_playlist
                 self.__source = source
                 self.__db = db
@@ -151,7 +151,7 @@ class SongsHandler(xml.sax.handler.ContentHandler):
 
                         except Exception as e: # This happens on duplicate uris being added
                                 sys.excepthook(*sys.exc_info())
-                                print("Couldn't add %s - %s" % (self.__artist, self.__title), e)
+                                print(f"Couldn't add {self.__artist} - {self.__title}", e)
 
                         self.__default()
 
@@ -203,14 +203,14 @@ class SongsHandler(xml.sax.handler.ContentHandler):
 
 class AmpachePlaylist(RB.StaticPlaylistSource):
         def __init__(self, **kwargs):
-                super(AmpachePlaylist, self).__init__(**kwargs)
+                super().__init__(**kwargs)
 
 GObject.type_register(AmpachePlaylist)
 
 class AmpacheBrowser(RB.BrowserSource):
 
         def __init__(self, **kwargs):
-                super(AmpacheBrowser, self).__init__(**kwargs)
+                super().__init__(**kwargs)
 
                 self.__limit = 500
 
@@ -220,7 +220,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         'ampache')
                 self.__songs_cache_filename = os.path.join(
                         self.__cache_directory,
-                        ''.join([self.__songs_cache, '.xml']))
+                        f"{self.__songs_cache}.xml")
                 self.__settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
                 self.__albumart = {}
                 self.__playlists = collections.deque()
@@ -265,22 +265,23 @@ class AmpacheBrowser(RB.BrowserSource):
                         offsets = list(range(0, items, self.__limit))
                         num_chunks = len(offsets)
                         chunk_contents = [None] * num_chunks
-                        remaining = [num_chunks]
-                        songs_loaded = [0]
-                        aborted = [False]
+                        remaining = num_chunks
+                        songs_loaded = 0
+                        aborted = False
 
-                        self.__text = 'Fetching %s... (0 / %d songs)' % (playlist_name, items)
+                        self.__text = f'Fetching {playlist_name}... (0 / {items} songs)'
                         self.__busy = True
                         self.notify_status_changed()
 
                         def songs_downloaded_cb(session_obj, result, chunk_index):
+                                nonlocal aborted, remaining, songs_loaded
                                 # Always call finish() to free the GLib result, even
                                 # when cancelled or when we intend to discard the data.
                                 try:
                                         contents = session_obj.send_and_read_finish(result).get_data()
                                 except Exception as e:
-                                        if self.__activated and not aborted[0]:
-                                                aborted[0] = True
+                                        if self.__activated and not aborted:
+                                                aborted = True
                                                 edlg = Gtk.MessageDialog(
                                                         message_type=Gtk.MessageType.ERROR,
                                                         buttons=Gtk.ButtonsType.OK,
@@ -292,10 +293,10 @@ class AmpacheBrowser(RB.BrowserSource):
                                                 self.__busy = False
                                                 self.notify_status_changed()
                                         return
-                                if aborted[0] or not self.__activated:
+                                if aborted or not self.__activated:
                                         return
 
-                                print("parse chunk %s[%d]..." % (playlist_name, offsets[chunk_index]))
+                                print(f"parse chunk {playlist_name}[{offsets[chunk_index]}]...")
                                 # instantiate songs parser and parse XML
                                 parser = xml.sax.make_parser()
                                 parser.setContentHandler(SongsHandler(
@@ -309,22 +310,21 @@ class AmpacheBrowser(RB.BrowserSource):
                                 try:
                                         parser.feed(contents)
                                 except xml.sax.SAXParseException as e:
-                                        print("error parsing songs: %s: %s" %
-                                                (e, contents.decode('utf-8').split("\n")[e.getLineNumber()]))
+                                        print(f"error parsing songs: {e}: "
+                                                f"{contents.decode('utf-8').splitlines()[e.getLineNumber()]}")
 
                                 # Commit and update the UI after each chunk so songs
                                 # appear progressively rather than all at once.
                                 if not is_playlist:
                                         self.__db.commit()
-                                songs_loaded[0] += min(self.__limit, items - offsets[chunk_index])
-                                self.__text = 'Fetching %s... (%d / %d songs)' % (
-                                        playlist_name, min(songs_loaded[0], items), items)
+                                songs_loaded += min(self.__limit, items - offsets[chunk_index])
+                                self.__text = f'Fetching {playlist_name}... ({min(songs_loaded, items)} / {items} songs)'
                                 self.notify_status_changed()
 
                                 chunk_contents[chunk_index] = contents
-                                remaining[0] -= 1
+                                remaining -= 1
 
-                                if remaining[0] == 0:
+                                if remaining == 0:
                                         all_chunks_done()
 
                         def all_chunks_done():
@@ -346,9 +346,9 @@ class AmpacheBrowser(RB.BrowserSource):
                                         newest_time = int(mktime(self.__handshake_newest.timetuple()))
                                         # change modification time to newest time
                                         os.utime(cache_filename, (newest_time, newest_time))
-                                        print("wrote cache file: %s" % cache_filename)
+                                        print(f"wrote cache file: {cache_filename}")
                                 except Exception as e:
-                                        print("error writing cache %s: %s" % (cache_filename, e))
+                                        print(f"error writing cache {cache_filename}: {e}")
 
                                 self.__text = None
                                 self.__busy = False
@@ -358,8 +358,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         # Fire all chunk requests in parallel via Soup so the
                         # per-host connection limit applies to our session, not GIO's.
                         for i, offset in enumerate(offsets):
-                                chunk_uri = ''.join([uri,
-                                        '&offset=%s&limit=%s' % (offset, self.__limit)])
+                                chunk_uri = f"{uri}&offset={offset}&limit={self.__limit}"
                                 cancel = Gio.Cancellable()
                                 self.__cancellables.append(cancel)
                                 self.__session.send_and_read_async(
@@ -368,19 +367,17 @@ class AmpacheBrowser(RB.BrowserSource):
                                         cancel,
                                         songs_downloaded_cb,
                                         i)
-                                print("download %s[%d]: %s" %
-                                        (playlist_name, offset, chunk_uri))
+                                print(f"download {playlist_name}[{offset}]: {chunk_uri}")
 
                 def download_iterate():
                         try:
                                 if len(self.__playlists) > 0:
                                         playlist = self.__playlists.popleft()
-                                        print('process playlist: %s' % playlist[1])
+                                        print(f'process playlist: {playlist[1]}')
                                         if playlist[0] == 0:
                                                 download_songs(
-                                                        '%s/server/xml.server.php?action=songs&auth=%s' %
-                                                                (self.__settings['url'],
-                                                                self.__handshake_auth),
+                                                        f"{self.__settings['url']}/server/xml.server.php"
+                                                        f"?action=songs&auth={self.__handshake_auth}",
                                                         self.__handshake_songs,
                                                         False,
                                                         self,
@@ -401,16 +398,15 @@ class AmpacheBrowser(RB.BrowserSource):
                                                 self.__shell.append_display_page(playlist_source, self)
 
                                                 download_songs(
-                                                        '%s/server/xml.server.php?action=playlist_songs&filter=%s&auth=%s' % \
-                                                                (self.__settings['url'],
-                                                                playlist[0],
-                                                                self.__handshake_auth),
+                                                        f"{self.__settings['url']}/server/xml.server.php"
+                                                        f"?action=playlist_songs&filter={playlist[0]}"
+                                                        f"&auth={self.__handshake_auth}",
                                                         playlist[2],
                                                         True,
                                                         playlist_source,
                                                         os.path.join(
                                                                 self.__cache_directory,
-                                                                ''.join([playlist[1], '.xml'])),
+                                                                f"{playlist[1]}.xml"),
                                                         playlist[1])
 
                                 else:
@@ -418,7 +414,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                         self.__shell.props.display_page_model.refilter()
 
                         except Exception as e:
-                                print('Exception: %s' % e)
+                                print(f'Exception: {e}')
                                 return
 
 
@@ -460,7 +456,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         try:
                                 parser.feed(contents)
                         except xml.sax.SAXParseException as e:
-                                print("error parsing playlists: %s" % e)
+                                print(f"error parsing playlists: {e}")
 
                         download_iterate()
 
@@ -494,7 +490,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
                                         parser.feed(contents)
                                 except xml.sax.SAXParseException as e:
-                                        print("error parsing songs: %s" % e)
+                                        print(f"error parsing songs: {e}")
 
                                 # Commit all DB writes for this cache file in one batch
                                 if not is_playlist:
@@ -507,7 +503,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                 # load next cache
                                 load_iterate()
 
-                        self.__text = 'Load from cache "%s"...' % filename
+                        self.__text = f'Load from cache "{filename}"...'
                         self.__busy = True
                         self.notify_status_changed()
 
@@ -522,7 +518,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         try:
                                 cache = self.__caches.popleft()
 
-                                print('process playlist: %s' % cache)
+                                print(f'process playlist: {cache}')
 
                                 if cache == self.__songs_cache:
                                         load_songs(
@@ -546,7 +542,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                         load_songs(
                                                 os.path.join(
                                                         self.__cache_directory,
-                                                        ''.join([cache, '.xml'])),
+                                                        f"{cache}.xml"),
                                                 True,
                                                 playlist_source)
 
@@ -565,7 +561,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                 else:
                                         self.__caches.append(name)
 
-                        print('caches: %s' % self.__caches)
+                        print(f'caches: {self.__caches}')
 
                         # start processing first cache
                         load_iterate()
@@ -602,7 +598,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         try:
                                 parser.feed(contents)
                         except xml.sax.SAXParseException as e:
-                                print("error parsing handshake: %s" % e)
+                                print(f"error parsing handshake: {e}")
 
                         # convert handshake update time into datetime
                         handshake_update = datetime.strptime(
@@ -638,16 +634,15 @@ class AmpacheBrowser(RB.BrowserSource):
                                                 filename)
                                         try:
                                                 if os.path.isfile(abs_filename):
-                                                        print("remove cache file: %s" % abs_filename)
+                                                        print(f"remove cache file: {abs_filename}")
                                                         os.unlink(abs_filename)
                                         except Exception as e:
                                                 print(e)
 
                                 # download playlists
-                                ampache_server_uri = \
-                                        '%s/server/xml.server.php?action=playlists&auth=%s' % \
-                                        (self.__settings['url'],
-                                        self.__handshake_auth)
+                                ampache_server_uri = (
+                                        f"{self.__settings['url']}/server/xml.server.php"
+                                        f"?action=playlists&auth={self.__handshake_auth}")
                                 cancel = Gio.Cancellable()
                                 self.__cancellables.append(cancel)
                                 self.__session.send_and_read_async(
@@ -656,7 +651,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                         cancel,
                                         playlists_cb,
                                         None)
-                                print("downloading playlists: %s" % (ampache_server_uri))
+                                print(f"downloading playlists: {ampache_server_uri}")
 
                 # check for errors
                 if not self.__settings['url']:
@@ -695,19 +690,15 @@ class AmpacheBrowser(RB.BrowserSource):
                         password = hashlib.sha256(self.__settings['password'].encode('utf-8')).hexdigest()
                         authkey = hashlib.sha256((str(timestamp) + password).encode('utf-8')).hexdigest()
 
-                        ampache_server_uri = \
-                                '%s/server/xml.server.php?action=handshake&auth=%s&timestamp=%s&user=%s&version=350001' % \
-                                (self.__settings['url'],
-                                authkey,
-                                timestamp,
-                                self.__settings['username'])
+                        ampache_server_uri = (
+                                f"{self.__settings['url']}/server/xml.server.php"
+                                f"?action=handshake&auth={authkey}&timestamp={timestamp}"
+                                f"&user={self.__settings['username']}&version=350001")
                 else:
                         # api key provided
-                        ampache_server_uri = \
-                                '%s/server/xml.server.php?action=handshake&auth=%s&version=350001' % \
-                                (self.__settings['url'],
-                                self.__settings['password'])
-
+                        ampache_server_uri = (
+                                f"{self.__settings['url']}/server/xml.server.php"
+                                f"?action=handshake&auth={self.__settings['password']}&version=350001")
 
                 # execute handshake
                 cancel = Gio.Cancellable()
@@ -718,7 +709,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         cancel,
                         handshake_cb,
                         parser)
-                print("downloading handshake: %s" % (ampache_server_uri))
+                print(f"downloading handshake: {ampache_server_uri}")
 
         # Source is activated
         def do_activate(self):
@@ -749,7 +740,7 @@ class AmpacheBrowser(RB.BrowserSource):
                 artist = key.get_field('artist')
                 album = key.get_field('album')
                 uri = self.__albumart.get(artist + album)
-                print('album art uri: %s' % uri)
+                print(f'album art uri: {uri}')
                 if uri:
                         storekey = RB.ExtDBKey.create_storage('album', album)
                         storekey.add_field('artist', artist)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Unit tests for AmpacheBrowser SAX handlers and the XML cache roundtrip.
+Unit tests for AmpacheBrowser SAX handlers, songs_to_rhythmdb(), and the
+SQLite cache roundtrip.
 
 Run with:
     python3 -m unittest test_handlers
@@ -15,12 +16,11 @@ import tempfile
 import unittest
 import xml.sax
 from unittest.mock import MagicMock
-from AmpacheBrowser import HandshakeHandler, PlaylistsHandler, SongsHandler
 
 # ---------------------------------------------------------------------------
-# Stub out gi and all GObject/Rhythmbox dependencies before importing handlers.
-# The handlers themselves have no GObject logic, but AmpacheBrowser.py imports
-# gi at module level, so we must satisfy those imports first.
+# Stub out gi and all GObject/Rhythmbox dependencies before importing
+# AmpacheBrowser.  The module imports gi at the top level, so we must satisfy
+# those imports first.
 # ---------------------------------------------------------------------------
 
 _RB = MagicMock()
@@ -45,6 +45,12 @@ sys.modules['gi'] = _gi
 sys.modules['gi.repository'] = _gi_repository
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from AmpacheBrowser import (
+    HandshakeHandler, PlaylistsHandler, SongsHandler,
+    songs_to_rhythmdb, _open_db,
+    _INSERT_SONG_SQL, _INSERT_PLAYLIST_SQL, _INSERT_PLAYLIST_SONG_SQL,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +111,6 @@ class TestHandshakeHandler(unittest.TestCase):
     def test_multipart_text_node(self):
         """SAX may split a text node across multiple characters() calls;
         the value must be correctly reassembled."""
-        # Simulate a very long auth value that expat might split
         long_auth = 'abcdef' * 50
         xml = f'<?xml version="1.0"?><root><auth>{long_auth}</auth></root>'
         handshake = {}
@@ -225,28 +230,133 @@ SONGS_XML = f"""\
 class TestSongsHandler(unittest.TestCase):
 
     def setUp(self):
+        self.handler = SongsHandler(NEW_AUTH)
+        parse_xml(self.handler, SONGS_XML)
+
+    def test_two_songs_collected(self):
+        self.assertEqual(len(self.handler.songs), 2)
+
+    def test_title(self):
+        self.assertEqual(self.handler.songs[0]['title'], 'Test Song')
+
+    def test_artist(self):
+        self.assertEqual(self.handler.songs[0]['artist'], 'Test Artist')
+
+    def test_album(self):
+        self.assertEqual(self.handler.songs[0]['album'], 'Test Album')
+
+    def test_genre(self):
+        self.assertEqual(self.handler.songs[0]['tag'], 'Rock')
+
+    def test_track_number(self):
+        self.assertEqual(self.handler.songs[0]['track'], 3)
+
+    def test_year_stored_as_integer(self):
+        self.assertEqual(self.handler.songs[0]['year'], 2020)
+
+    def test_duration(self):
+        self.assertEqual(self.handler.songs[0]['time'], 245)
+
+    def test_file_size(self):
+        self.assertEqual(self.handler.songs[0]['size'], 8192000)
+
+    def test_rating(self):
+        self.assertEqual(self.handler.songs[0]['rating'], 4)
+
+    def test_auth_token_replaced_in_url(self):
+        url = self.handler.songs[0]['url']
+        self.assertIn(f'ssid={NEW_AUTH}', url)
+        self.assertNotIn(OLD_AUTH, url)
+
+    def test_auth_token_replaced_in_art(self):
+        art_url = self.handler.albumart.get('Test ArtistTest Album', '')
+        self.assertIn(f'auth={NEW_AUTH}', art_url)
+        self.assertNotIn(OLD_AUTH, art_url)
+
+    def test_albumart_stored(self):
+        self.assertIn('Test ArtistTest Album', self.handler.albumart)
+
+    def test_empty_artist_stored_as_empty_string(self):
+        self.assertEqual(self.handler.songs[1]['artist'], '')
+
+    def test_empty_album_stored_as_empty_string(self):
+        self.assertEqual(self.handler.songs[1]['album'], '')
+
+    def test_minimal_song_has_default_track(self):
+        self.assertEqual(self.handler.songs[1]['track'], -1)
+
+    def test_no_auth_leaves_url_unchanged(self):
+        """With auth=None, URLs should pass through unmodified."""
+        handler = SongsHandler(None)
+        parse_xml(handler, SONGS_XML)
+        self.assertIn(OLD_AUTH, handler.songs[0]['url'])
+
+    def test_year_out_of_range_ignored(self):
+        xml = """\
+<?xml version="1.0"?>
+<root>
+<song id="1">
+<title>Bad Year</title>
+<url>http://example.com/bad-year.mp3</url>
+<year>0</year>
+</song>
+</root>"""
+        handler = SongsHandler(None)
+        parse_xml(handler, xml)
+        self.assertEqual(handler.songs[0]['year'], -1)
+
+
+# ---------------------------------------------------------------------------
+# songs_to_rhythmdb()
+# ---------------------------------------------------------------------------
+
+_SONG_DICTS = [
+    {
+        'url':    'http://example.com/song.mp3',
+        'artist': 'Artist',
+        'album':  'Album',
+        'title':  'Song',
+        'tag':    'Rock',
+        'track':  1,
+        'year':   2020,
+        'time':   200,
+        'size':   5000000,
+        'rating': 4,
+        'art':    'http://example.com/art.jpg',
+    },
+    {
+        'url':    'http://example.com/minimal.mp3',
+        'artist': '',
+        'album':  '',
+        'title':  'Minimal',
+        'tag':    '',
+        'track':  -1,
+        'year':   -1,
+        'time':   -1,
+        'size':   -1,
+        'rating': -1,
+        'art':    '',
+    },
+]
+
+
+class TestSongsToRhythmdb(unittest.TestCase):
+
+    def setUp(self):
         self.db = MagicMock()
         self.db.entry_lookup_by_location.return_value = None
-
         self.entry1 = MagicMock()
         self.entry2 = MagicMock()
         _RB.RhythmDBEntry.new.reset_mock()
         _RB.RhythmDBEntry.new.side_effect = [self.entry1, self.entry2]
-
-        _GLib.Date.valid_year.return_value = True
         _GLib.Date.new_dmy.return_value.get_julian.return_value = 737060
-
         self.albumart = {}
         self.entries = []
-
-        parse_xml(
-            SongsHandler(
-                False, None, self.db, MagicMock(),
-                self.albumart, NEW_AUTH, self.entries),
-            SONGS_XML)
+        songs_to_rhythmdb(
+            _SONG_DICTS, self.albumart, self.db, MagicMock(),
+            False, None, self.entries)
 
     def _props(self, entry):
-        """Return {prop_type: value} dict for all entry_set calls on entry."""
         result = {}
         for c in self.db.entry_set.call_args_list:
             if c.args[0] is entry:
@@ -257,44 +367,37 @@ class TestSongsHandler(unittest.TestCase):
         self.assertEqual(len(self.entries), 2)
 
     def test_title(self):
-        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.TITLE], 'Test Song')
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.TITLE], 'Song')
 
     def test_artist(self):
-        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.ARTIST], 'Test Artist')
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.ARTIST], 'Artist')
 
     def test_album(self):
-        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.ALBUM], 'Test Album')
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.ALBUM], 'Album')
 
     def test_genre(self):
         self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.GENRE], 'Rock')
 
     def test_track_number(self):
-        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.TRACK_NUMBER], 3)
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.TRACK_NUMBER], 1)
+
+    def test_year_converted_to_julian(self):
+        self.assertIn(_RB.RhythmDBPropType.DATE, self._props(self.entry1))
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.DATE], 737060)
 
     def test_duration(self):
-        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.DURATION], 245)
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.DURATION], 200)
 
     def test_file_size(self):
-        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.FILE_SIZE], 8192000)
+        self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.FILE_SIZE], 5000000)
 
     def test_rating(self):
         self.assertEqual(self._props(self.entry1)[_RB.RhythmDBPropType.RATING], 4)
 
-    def test_auth_token_replaced_in_url(self):
-        url = _RB.RhythmDBEntry.new.call_args_list[0].args[2]
-        self.assertIn(f'ssid={NEW_AUTH}', url)
-        self.assertNotIn(OLD_AUTH, url)
-
-    def test_auth_token_replaced_in_art(self):
-        art_url = self.albumart.get('Test ArtistTest Album', '')
-        self.assertIn(f'auth={NEW_AUTH}', art_url)
-        self.assertNotIn(OLD_AUTH, art_url)
-
     def test_albumart_stored(self):
-        self.assertIn('Test ArtistTest Album', self.albumart)
+        self.assertIn('ArtistAlbum', self.albumart)
 
     def test_empty_artist_not_set(self):
-        # entry2 (Minimal Song) has empty artist — entry_set should not be called for ARTIST
         props = self._props(self.entry2)
         self.assertNotIn(_RB.RhythmDBPropType.ARTIST, props)
 
@@ -302,111 +405,102 @@ class TestSongsHandler(unittest.TestCase):
         props = self._props(self.entry2)
         self.assertNotIn(_RB.RhythmDBPropType.ALBUM, props)
 
+    def test_neg1_year_not_set(self):
+        props = self._props(self.entry2)
+        self.assertNotIn(_RB.RhythmDBPropType.DATE, props)
+
     def test_duplicate_entry_skipped(self):
-        """If entry_lookup_by_location returns an existing entry, no new
-        entry should be created and no properties should be set."""
         db = MagicMock()
-        db.entry_lookup_by_location.return_value = MagicMock()
+        db.entry_lookup_by_location.return_value = MagicMock()  # already in db
         _RB.RhythmDBEntry.new.reset_mock()
         entries = []
-        parse_xml(
-            SongsHandler(False, None, db, MagicMock(), {}, NEW_AUTH, entries),
-            SONGS_XML)
+        songs_to_rhythmdb(_SONG_DICTS, {}, db, MagicMock(), False, None, entries)
         self.assertEqual(len(entries), 0)
         _RB.RhythmDBEntry.new.assert_not_called()
 
     def test_playlist_mode_calls_add_location(self):
         source = MagicMock()
         _RB.RhythmDBEntry.new.side_effect = None
-        parse_xml(
-            SongsHandler(True, source, self.db, MagicMock(), {}, NEW_AUTH, []),
-            SONGS_XML)
+        songs_to_rhythmdb(_SONG_DICTS, {}, MagicMock(), MagicMock(), True, source, [])
         self.assertEqual(source.add_location.call_count, 2)
 
-    def test_no_auth_leaves_url_unchanged(self):
-        """With auth=None, URLs should pass through unmodified."""
-        db = MagicMock()
-        db.entry_lookup_by_location.return_value = None
-        _RB.RhythmDBEntry.new.reset_mock()
-        _RB.RhythmDBEntry.new.side_effect = [MagicMock(), MagicMock()]
-        parse_xml(
-            SongsHandler(False, None, db, MagicMock(), {}, None, []),
-            SONGS_XML)
-        url = _RB.RhythmDBEntry.new.call_args_list[0].args[2]
-        self.assertIn(OLD_AUTH, url)
-
 
 # ---------------------------------------------------------------------------
-# Cache roundtrip
+# SQLite cache roundtrip
 # ---------------------------------------------------------------------------
 
-CACHE_XML = """\
-<?xml version="1.0" encoding="UTF-8"?>
-<root>
-<song id="5001">
-<title>Roundtrip Song</title>
-<artist>Cache Artist</artist>
-<album>Cache Album</album>
-<tag>Jazz</tag>
-<track>7</track>
-<year>2019</year>
-<time>180</time>
-<size>6000000</size>
-<rating>5</rating>
-<url>http://example.com/cache.mp3</url>
-<art>http://example.com/cache-art.jpg</art>
-</song>
-<song id="5002">
-<title>Second Song</title>
-<artist>Second Artist</artist>
-<album>Second Album</album>
-<track>2</track>
-<time>210</time>
-<url>http://example.com/second.mp3</url>
-</song>
-</root>
-"""
+_CACHE_SONGS = [
+    {
+        'url':    'http://example.com/cache.mp3',
+        'artist': 'Cache Artist',
+        'album':  'Cache Album',
+        'title':  'Roundtrip Song',
+        'tag':    'Jazz',
+        'track':  7,
+        'year':   2019,
+        'time':   180,
+        'size':   6000000,
+        'rating': 5,
+        'art':    'http://example.com/cache-art.jpg',
+    },
+    {
+        'url':    'http://example.com/second.mp3',
+        'artist': 'Second Artist',
+        'album':  'Second Album',
+        'title':  'Second Song',
+        'tag':    '',
+        'track':  2,
+        'year':   -1,
+        'time':   210,
+        'size':   -1,
+        'rating': -1,
+        'art':    '',
+    },
+]
 
 
-class TestCacheRoundtrip(unittest.TestCase):
+class TestSQLiteRoundtrip(unittest.TestCase):
     """
-    Verify that song data survives a write-then-read cycle through the XML
-    cache format.  The 'write' side is a temporary file containing XML in the
-    format that all_chunks_done produces; the 'read' side uses SongsHandler
-    directly, mirroring what songs_loaded_cb does.
+    Verify that song data survives a write-then-read cycle through the SQLite
+    cache.  The 'write' side uses _open_db() and _INSERT_SONG_SQL; the 'read'
+    side mirrors what load_from_cache() does, then calls songs_to_rhythmdb().
     """
 
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(
-            suffix='.xml', mode='wb', delete=False)
-        self.tmp.write(CACHE_XML.encode('utf-8'))
-        self.tmp.close()
+        fd, self.tmp_path = tempfile.mkstemp(suffix='.sqlite')
+        os.close(fd)
+        # _open_db / sqlite3.connect treats the empty file as a new database.
+
+        # Write
+        db_conn = _open_db(self.tmp_path)
+        db_conn.executemany(_INSERT_SONG_SQL, _CACHE_SONGS)
+        db_conn.commit()
+        db_conn.close()
+
+        # Read back (ORDER BY url for deterministic ordering)
+        db_conn = _open_db(self.tmp_path)
+        songs = [dict(row) for row in
+                 db_conn.execute('SELECT * FROM songs ORDER BY url')]
+        db_conn.close()
 
         self.db = MagicMock()
         self.db.entry_lookup_by_location.return_value = None
-
-        self.entry1 = MagicMock()
-        self.entry2 = MagicMock()
+        self.entry_cache = MagicMock()
+        self.entry_second = MagicMock()
         _RB.RhythmDBEntry.new.reset_mock()
-        _RB.RhythmDBEntry.new.side_effect = [self.entry1, self.entry2]
-
-        _GLib.Date.valid_year.return_value = True
+        # ORDER BY url: cache.mp3 < second.mp3 alphabetically
+        _RB.RhythmDBEntry.new.side_effect = [self.entry_cache, self.entry_second]
         _GLib.Date.new_dmy.return_value.get_julian.return_value = 736695
 
         self.albumart = {}
         self.entries = []
-
-        with open(self.tmp.name, 'rb') as f:
-            contents = f.read()
-
-        parser = xml.sax.make_parser()
-        parser.setContentHandler(SongsHandler(
-            False, None, self.db, MagicMock(),
-            self.albumart, None, self.entries))
-        parser.feed(contents)
+        songs_to_rhythmdb(
+            songs, self.albumart, self.db, MagicMock(),
+            False, None, self.entries)
 
     def tearDown(self):
-        os.unlink(self.tmp.name)
+        if os.path.exists(self.tmp_path):
+            os.unlink(self.tmp_path)
 
     def _props(self, entry):
         result = {}
@@ -420,39 +514,39 @@ class TestCacheRoundtrip(unittest.TestCase):
 
     def test_title_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.TITLE],
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.TITLE],
             'Roundtrip Song')
 
     def test_artist_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.ARTIST],
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.ARTIST],
             'Cache Artist')
 
     def test_album_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.ALBUM],
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.ALBUM],
             'Cache Album')
 
     def test_genre_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.GENRE],
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.GENRE],
             'Jazz')
 
     def test_track_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.TRACK_NUMBER], 7)
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.TRACK_NUMBER], 7)
 
     def test_duration_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.DURATION], 180)
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.DURATION], 180)
 
     def test_file_size_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.FILE_SIZE], 6000000)
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.FILE_SIZE], 6000000)
 
     def test_rating_survives(self):
         self.assertEqual(
-            self._props(self.entry1)[_RB.RhythmDBPropType.RATING], 5)
+            self._props(self.entry_cache)[_RB.RhythmDBPropType.RATING], 5)
 
     def test_url_survives(self):
         url = _RB.RhythmDBEntry.new.call_args_list[0].args[2]
@@ -466,12 +560,36 @@ class TestCacheRoundtrip(unittest.TestCase):
 
     def test_second_song_title(self):
         self.assertEqual(
-            self._props(self.entry2)[_RB.RhythmDBPropType.TITLE],
+            self._props(self.entry_second)[_RB.RhythmDBPropType.TITLE],
             'Second Song')
 
     def test_second_song_url(self):
         url = _RB.RhythmDBEntry.new.call_args_list[1].args[2]
         self.assertEqual(url, 'http://example.com/second.mp3')
+
+    def test_playlist_roundtrip(self):
+        """Playlist IDs and song URLs survive a write-then-read cycle."""
+        db_conn = _open_db(self.tmp_path)
+        db_conn.execute(_INSERT_PLAYLIST_SQL, ('42', 'My Playlist'))
+        db_conn.execute(_INSERT_PLAYLIST_SONG_SQL,
+                        ('42', 'http://example.com/cache.mp3'))
+        db_conn.execute(_INSERT_PLAYLIST_SONG_SQL,
+                        ('42', 'http://example.com/second.mp3'))
+        db_conn.commit()
+
+        playlists = [dict(row) for row in
+                     db_conn.execute('SELECT * FROM playlists')]
+        urls = [row[0] for row in db_conn.execute(
+            'SELECT url FROM playlist_songs WHERE playlist_id = ?', ('42',))]
+        db_conn.close()
+
+        self.assertEqual(len(playlists), 1)
+        self.assertEqual(playlists[0]['id'], '42')
+        self.assertEqual(playlists[0]['name'], 'My Playlist')
+        self.assertEqual(sorted(urls), [
+            'http://example.com/cache.mp3',
+            'http://example.com/second.mp3',
+        ])
 
 
 if __name__ == '__main__':

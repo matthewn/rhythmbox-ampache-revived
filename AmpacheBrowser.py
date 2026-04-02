@@ -1,5 +1,5 @@
-# -*- Mode: python; coding: utf-8; tab-width: 8; indent-tabs-mode: t;
-# -*- vim: expandtab shiftwidth=8 softtabstop=8 tabstop=8
+# -*- Mode: python; coding: utf-8; tab-width: 4; indent-tabs-mode: nil; -*-
+# vim: expandtab shiftwidth=4 softtabstop=4 tabstop=4
 #
 # (c) 2010
 #       envyseapets@gmail.com
@@ -39,10 +39,107 @@ import re
 import hashlib
 import os
 import sys
+import sqlite3
 import collections
 
 import xml.sax
 import xml.sax.handler
+
+# ---------------------------------------------------------------------------
+# SQLite schema and helpers
+# ---------------------------------------------------------------------------
+
+_CREATE_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS songs (
+    url    TEXT PRIMARY KEY,
+    artist TEXT NOT NULL DEFAULT '',
+    album  TEXT NOT NULL DEFAULT '',
+    title  TEXT NOT NULL DEFAULT '',
+    tag    TEXT NOT NULL DEFAULT '',
+    track  INTEGER NOT NULL DEFAULT -1,
+    year   INTEGER NOT NULL DEFAULT -1,
+    time   INTEGER NOT NULL DEFAULT -1,
+    size   INTEGER NOT NULL DEFAULT -1,
+    rating INTEGER NOT NULL DEFAULT -1,
+    art    TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS playlists (
+    id   TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS playlist_songs (
+    playlist_id TEXT NOT NULL,
+    url         TEXT NOT NULL
+);
+"""
+
+_INSERT_SONG_SQL = """
+INSERT OR REPLACE INTO songs
+    (url, artist, album, title, tag, track, year, time, size, rating, art)
+VALUES
+    (:url, :artist, :album, :title, :tag, :track, :year, :time, :size, :rating, :art)
+"""
+
+_INSERT_PLAYLIST_SQL = \
+    "INSERT OR REPLACE INTO playlists (id, name) VALUES (?, ?)"
+
+_INSERT_PLAYLIST_SONG_SQL = \
+    "INSERT INTO playlist_songs (playlist_id, url) VALUES (?, ?)"
+
+
+def _open_db(path):
+    """Open (or create) the SQLite cache database and return a connection."""
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(_CREATE_SCHEMA_SQL)
+    conn.commit()
+    return conn
+
+
+def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source, entries):
+    """Write a list of song dicts into RhythmDB (or a playlist source)."""
+    for song in songs:
+        try:
+            if is_playlist:
+                source.add_location(song['url'], -1)
+            else:
+                # add the track to the database if it doesn't exist
+                entry = db.entry_lookup_by_location(song['url'])
+                if entry is None:
+                    entry = RB.RhythmDBEntry.new(db, entry_type, song['url'])
+                    entries.append(entry)
+
+                    if song['artist']:
+                        db.entry_set(entry, RB.RhythmDBPropType.ARTIST, song['artist'])
+                    if song['album']:
+                        db.entry_set(entry, RB.RhythmDBPropType.ALBUM, song['album'])
+                    if song['title']:
+                        db.entry_set(entry, RB.RhythmDBPropType.TITLE, song['title'])
+                    if song['tag']:
+                        db.entry_set(entry, RB.RhythmDBPropType.GENRE, song['tag'])
+                    if song['track'] != -1:
+                        db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, song['track'])
+                    if song['year'] != -1:
+                        julian = GLib.Date.new_dmy(1, 1, song['year']).get_julian()
+                        db.entry_set(entry, RB.RhythmDBPropType.DATE, julian)
+                    if song['time'] != -1:
+                        db.entry_set(entry, RB.RhythmDBPropType.DURATION, song['time'])
+                    if song['size'] != -1:
+                        db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, song['size'])
+                    if song['rating'] != -1:
+                        db.entry_set(entry, RB.RhythmDBPropType.RATING, song['rating'])
+
+                    if song['art']:
+                        albumart[song['artist'] + song['album']] = song['art']
+
+        except Exception as e:  # This happens on duplicate uris being added
+            sys.excepthook(*sys.exc_info())
+            print(f"Couldn't add {song['artist']} - {song['title']}", e)
+
+
+# ---------------------------------------------------------------------------
+# SAX handlers (used to parse server responses during download)
+# ---------------------------------------------------------------------------
 
 class HandshakeHandler(xml.sax.handler.ContentHandler):
     def __init__(self, handshake):
@@ -94,17 +191,21 @@ class PlaylistsHandler(xml.sax.handler.ContentHandler):
         self._text = self._text + content
 
 class SongsHandler(xml.sax.handler.ContentHandler):
-    def __init__(self, is_playlist, source, db, entry_type, albumart, auth, entries):
+    """Parse an Ampache songs XML response into a list of song dicts.
+
+    After parsing, self.songs is a list of dicts with keys matching the
+    songs table columns, and self.albumart maps artist+album to art URL.
+    Year is stored as a raw integer (not Julian); conversion happens in
+    songs_to_rhythmdb() when writing to RhythmDB.
+    """
+
+    def __init__(self, auth):
         super().__init__()
-        self._is_playlist = is_playlist
-        self._source = source
-        self._db = db
-        self._entry_type = entry_type
-        self._albumart = albumart
         self._auth = auth
-        self._entries = entries
+        self._re_auth = re.compile(r'\b(auth|ssid)=[a-fA-F0-9]*')
+        self.songs = []
+        self.albumart = {}
         self._default()
-        self._re_auth = re.compile('\\b(auth|ssid)=[a-fA-F0-9]*')
 
     def startElement(self, name, attrs):
         if name == 'song':
@@ -115,49 +216,28 @@ class SongsHandler(xml.sax.handler.ContentHandler):
         # Process the song container unconditionally; only guard field elements
         # on self._text to avoid acting on empty/whitespace-only nodes.
         if name == 'song':
-            try:
-                if self._is_playlist:
-                    self._source.add_location(self._url, -1)
-                else:
-                    # add the track to the database if it doesn't exist
-                    entry = self._db.entry_lookup_by_location(self._url)
-                    if entry is None:
-                        entry = RB.RhythmDBEntry.new(
-                            self._db, self._entry_type, self._url)
-                        self._entries.append(entry)
-
-                        if self._artist != '':
-                            self._db.entry_set(entry, RB.RhythmDBPropType.ARTIST, self._artist)
-                        if self._album != '':
-                            self._db.entry_set(entry, RB.RhythmDBPropType.ALBUM, self._album)
-                        if self._title != '':
-                            self._db.entry_set(entry, RB.RhythmDBPropType.TITLE, self._title)
-                        if self._tag != '':
-                            self._db.entry_set(entry, RB.RhythmDBPropType.GENRE, self._tag)
-                        if self._track != -1:
-                            self._db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, self._track)
-                        if self._year != -1:
-                            self._db.entry_set(entry, RB.RhythmDBPropType.DATE, self._year)
-                        if self._time != -1:
-                            self._db.entry_set(entry, RB.RhythmDBPropType.DURATION, self._time)
-                        if self._size != -1:
-                            self._db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, self._size)
-                        if self._rating != -1:
-                            self._db.entry_set(entry, RB.RhythmDBPropType.RATING, self._rating)
-
-                        if self._art != '':
-                            self._albumart[self._artist + self._album] = self._art
-
-            except Exception as e: # This happens on duplicate uris being added
-                sys.excepthook(*sys.exc_info())
-                print(f"Couldn't add {self._artist} - {self._title}", e)
-
+            if self._url:
+                self.songs.append({
+                    'url':    self._url,
+                    'artist': self._artist,
+                    'album':  self._album,
+                    'title':  self._title,
+                    'tag':    self._tag,
+                    'track':  self._track,
+                    'year':   self._year,
+                    'time':   self._time,
+                    'size':   self._size,
+                    'rating': self._rating,
+                    'art':    self._art,
+                })
+                if self._art:
+                    self.albumart[self._artist + self._album] = self._art
             self._default()
 
         elif self._text:
             if name == 'url':
-                if self._auth: # replace ssid string with new auth string
-                    self._text = re.sub(self._re_auth, r'\1='+self._auth, self._text)
+                if self._auth:  # replace ssid/auth string with new auth string
+                    self._text = re.sub(self._re_auth, r'\1=' + self._auth, self._text)
                 self._url = self._text
             elif name == 'artist':
                 self._artist = self._text
@@ -170,8 +250,9 @@ class SongsHandler(xml.sax.handler.ContentHandler):
             elif name == 'track' and self._text.isdigit():
                 self._track = int(self._text)
             elif name == 'year' and self._text.isdigit():
-                if (GLib.Date.valid_year(int(self._text))):
-                    self._year = GLib.Date.new_dmy(1, 1, int(self._text)).get_julian()
+                year = int(self._text)
+                if 1 <= year <= 9999:
+                    self._year = year
             elif name == 'time' and self._text.isdigit():
                 self._time = int(self._text)
             elif name == 'size' and self._text.isdigit():
@@ -179,8 +260,8 @@ class SongsHandler(xml.sax.handler.ContentHandler):
             elif name == 'rating' and self._text.isdigit():
                 self._rating = int(self._text)
             elif name == 'art':
-                if self._auth: # replace auth string with new auth string
-                    self._text = re.sub(self._re_auth, 'auth='+self._auth, self._text)
+                if self._auth:  # replace auth string with new auth string
+                    self._text = re.sub(self._re_auth, 'auth=' + self._auth, self._text)
                 self._art = self._text
 
     def characters(self, content):
@@ -200,6 +281,11 @@ class SongsHandler(xml.sax.handler.ContentHandler):
         self._rating = -1
         self._art = ''
 
+
+# ---------------------------------------------------------------------------
+# Rhythmbox source classes
+# ---------------------------------------------------------------------------
+
 class AmpachePlaylist(RB.StaticPlaylistSource):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -213,17 +299,11 @@ class AmpacheBrowser(RB.BrowserSource):
 
         self._limit = 500
 
-        self._songs_cache = '_songs'
-        self._cache_directory = os.path.join(
-            RB.user_cache_dir(),
-            'ampache')
-        self._songs_cache_filename = os.path.join(
-            self._cache_directory,
-            f"{self._songs_cache}.xml")
+        self._cache_directory = os.path.join(RB.user_cache_dir(), 'ampache')
+        self._db_filename = os.path.join(self._cache_directory, '_ampache.sqlite')
         self._settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
         self._albumart = {}
         self._playlists = collections.deque()
-        self._caches = collections.deque()
         self._playlist_sources = []
         self._entries = []
         self._cancellables = set()
@@ -252,14 +332,17 @@ class AmpacheBrowser(RB.BrowserSource):
     def update(self, force_download):
 
         # Reset the playlist queue for this update cycle.  Without this,
-        # any un-consumed entry left from a cache-load path (which never
-        # calls download_iterate) would accumulate across calls and cause
-        # songs to be fetched multiple times.
-        self._playlists = collections.deque([[0, self._songs_cache]])
+        # any un-consumed entry left from a previous cycle would accumulate
+        # across calls and cause songs to be fetched multiple times.
+        self._playlists = collections.deque([[0, 'library']])
 
         ### download songs from Ampache server
 
-        def download_songs(uri, items, is_playlist, source, cache_filename, playlist_name):
+        # conn is opened in playlists_cb (when we know a download is needed)
+        # and closed in download_iterate (when the queue is exhausted).
+        conn = None
+
+        def download_songs(uri, items, is_playlist, source, playlist_id, playlist_name):
 
             if items <= 0:
                 self._text = None
@@ -272,7 +355,6 @@ class AmpacheBrowser(RB.BrowserSource):
             # all requests simultaneously rather than sequentially.
             offsets = list(range(0, items, self._limit))
             num_chunks = len(offsets)
-            chunk_contents = [None] * num_chunks
             remaining = num_chunks
             songs_loaded = 0
             aborted = False
@@ -307,63 +389,43 @@ class AmpacheBrowser(RB.BrowserSource):
                     return
 
                 print(f"parse chunk {playlist_name}[{offsets[chunk_index]}]...")
-                # instantiate songs parser and parse XML
+                handler = SongsHandler(self._handshake_auth)
                 parser = xml.sax.make_parser()
-                parser.setContentHandler(SongsHandler(
-                    is_playlist,
-                    source,
-                    self._db,
-                    self._entry_type,
-                    self._albumart,
-                    self._handshake_auth,
-                    self._entries))
+                parser.setContentHandler(handler)
                 try:
                     parser.feed(contents)
                 except xml.sax.SAXParseException as e:
                     print(f"error parsing songs: {e}: "
                         f"{contents.decode('utf-8').splitlines()[e.getLineNumber()]}")
 
-                # Commit and update the UI after each chunk so songs
-                # appear progressively rather than all at once.
+                # Write parsed songs to RhythmDB
+                songs_to_rhythmdb(
+                    handler.songs, self._albumart,
+                    self._db, self._entry_type,
+                    is_playlist, source, self._entries)
                 if not is_playlist:
                     self._db.commit()
+                self._albumart.update(handler.albumart)
+
+                # Write parsed songs to SQLite cache
+                if not is_playlist:
+                    conn.executemany(_INSERT_SONG_SQL, handler.songs)
+                else:
+                    conn.executemany(
+                        _INSERT_PLAYLIST_SONG_SQL,
+                        [(playlist_id, song['url']) for song in handler.songs])
+                conn.commit()
+
                 songs_loaded += min(self._limit, items - offsets[chunk_index])
                 self._text = f'Fetching {playlist_name}... ({min(songs_loaded, items)} / {items} songs)'
                 self.notify_status_changed()
 
-                chunk_contents[chunk_index] = contents
                 remaining -= 1
-
                 if remaining == 0:
-                    all_chunks_done()
-
-            def all_chunks_done():
-
-                # Remove enveloping <?xml> and <root> tags from intermediate
-                # chunks as needed to reassemble all chunks into one full .xml.
-                lines = []
-                for i, contents in enumerate(chunk_contents):
-                    chunk_lines = contents.decode('utf-8').splitlines(True)
-                    if i > 0:
-                        del chunk_lines[:2]   # strip <?xml?> and opening root tag
-                    if i < num_chunks - 1:
-                        del chunk_lines[-2:]  # strip closing root tag
-                    lines.extend(chunk_lines)
-
-                try:
-                    with open(cache_filename, 'wb') as f:
-                        f.write(''.join(lines).encode('utf-8'))
-                    newest_time = int(time.mktime(self._handshake_newest.timetuple()))
-                    # change modification time to newest time
-                    os.utime(cache_filename, (newest_time, newest_time))
-                    print(f"wrote cache file: {cache_filename}")
-                except Exception as e:
-                    print(f"error writing cache {cache_filename}: {e}")
-
-                self._text = None
-                self._busy = False
-                self.notify_status_changed()
-                download_iterate()
+                    self._text = None
+                    self._busy = False
+                    self.notify_status_changed()
+                    download_iterate()
 
             # Fire all chunk requests in parallel via Soup so the
             # per-host connection limit applies to our session, not GIO's.
@@ -380,6 +442,7 @@ class AmpacheBrowser(RB.BrowserSource):
                 print(f"download {playlist_name}[{offset}]: {chunk_uri}")
 
         def download_iterate():
+            nonlocal conn
             try:
                 if self._playlists:
                     playlist = self._playlists.popleft()
@@ -391,7 +454,7 @@ class AmpacheBrowser(RB.BrowserSource):
                             self._handshake_songs,
                             False,
                             self,
-                            self._songs_cache_filename,
+                            None,
                             playlist[1])
                     else:
                         # create AmpachePlaylist source
@@ -407,6 +470,10 @@ class AmpacheBrowser(RB.BrowserSource):
                         # insert AmpachePlaylist source into AmpacheBrowser source
                         self._shell.append_display_page(playlist_source, self)
 
+                        # record this playlist in the cache before downloading its songs
+                        conn.execute(_INSERT_PLAYLIST_SQL, (str(playlist[0]), playlist[1]))
+                        conn.commit()
+
                         download_songs(
                             f"{self._settings['url']}/server/xml.server.php"
                             f"?action=playlist_songs&filter={playlist[0]}"
@@ -414,12 +481,17 @@ class AmpacheBrowser(RB.BrowserSource):
                             playlist[2],
                             True,
                             playlist_source,
-                            os.path.join(
-                                self._cache_directory,
-                                f"{playlist[1]}.xml"),
+                            str(playlist[0]),
                             playlist[1])
 
                 else:
+                    # All playlists downloaded — seal the cache and finish.
+                    newest_time = int(time.mktime(self._handshake_newest.timetuple()))
+                    conn.close()
+                    conn = None
+                    # change modification time to newest time
+                    os.utime(self._db_filename, (newest_time, newest_time))
+                    print(f"wrote cache db: {self._db_filename}")
                     print('no more playlists to process, refilter display page model')
                     self._shell.props.display_page_model.refilter()
 
@@ -429,6 +501,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
 
         def playlists_cb(session_obj, result, cancel):
+            nonlocal conn
             self._cancellables.discard(cancel)
             try:
                 contents = session_obj.send_and_read_finish(result).get_data()
@@ -469,113 +542,60 @@ class AmpacheBrowser(RB.BrowserSource):
             except xml.sax.SAXParseException as e:
                 print(f"error parsing playlists: {e}")
 
+            # Open the cache database now that we know a download is needed.
+            conn = _open_db(self._db_filename)
+
             download_iterate()
 
-        ### load songs from cache
+        ### load library from SQLite cache
 
-        def load_songs(filename, is_playlist, source):
-            def songs_loaded_cb(file, result, cancel):
-                self._cancellables.discard(cancel)
-                try:
-                    (ok, contents, etag) = file.load_contents_finish(result)
-                except Exception as e:
-                    if self._activated:
-                        RB.error_dialog(
-                            title=_("Unable to load songs"),
-                            message=_("Rhythmbox could not load the Ampache songs."))
-                    return
-                if not self._activated:
-                    return
-
-                try:
-                    # instantiate songs parser
-                    parser = xml.sax.make_parser()
-                    parser.setContentHandler(
-                        SongsHandler(
-                            is_playlist,
-                            source,
-                            self._db,
-                            self._entry_type,
-                            self._albumart,
-                            self._handshake_auth,
-                            self._entries))
-
-                    parser.feed(contents)
-                except xml.sax.SAXParseException as e:
-                    print(f"error parsing songs: {e}")
-
-                # Commit all DB writes for this cache file in one batch
-                if not is_playlist:
-                    self._db.commit()
-
-                self._text = None
-                self._busy = False
-                self.notify_status_changed()
-
-                # load next cache
-                load_iterate()
-
-            self._text = f'Load from cache "{filename}"...'
+        def load_from_cache():
+            self._text = 'Loading from cache...'
             self._busy = True
             self.notify_status_changed()
 
-            cancel = Gio.Cancellable()
-            self._cancellables.add(cancel)
-            Gio.file_new_for_path(filename).load_contents_async(
-                cancel,
-                songs_loaded_cb,
-                cancel)
+            try:
+                db_conn = _open_db(self._db_filename)
 
-        def load_iterate():
-            if not self._caches:
-                print('no more playlists to process, refilter display page model')
-                self._shell.props.display_page_model.refilter()
-                return
+                # Load main song library
+                songs = [dict(row) for row in db_conn.execute('SELECT * FROM songs')]
+                songs_to_rhythmdb(
+                    songs, self._albumart,
+                    self._db, self._entry_type,
+                    False, self, self._entries)
+                self._db.commit()
 
-            cache = self._caches.popleft()
+                # Load playlists
+                playlists = [dict(row) for row in db_conn.execute('SELECT * FROM playlists')]
+                for playlist in playlists:
+                    # create AmpachePlaylist source
+                    playlist_source = GObject.new(
+                        AmpachePlaylist,
+                        is_local=False,
+                        shell=self._shell,
+                        entry_type=self._entry_type,
+                        name=_(playlist['name'])
+                    )
+                    self._playlist_sources.append(playlist_source)
 
-            print(f'process playlist: {cache}')
+                    # insert AmpachePlaylist source into AmpacheBrowser source
+                    self._shell.append_display_page(playlist_source, self)
 
-            if cache == self._songs_cache:
-                load_songs(
-                    self._songs_cache_filename,
-                    False,
-                    self)
-            else:
-                # create AmpachePlaylist source
-                playlist_source = GObject.new(
-                    AmpachePlaylist,
-                    is_local=False,
-                    shell=self._shell,
-                    entry_type=self._entry_type,
-                    name=_(cache)
-                )
-                self._playlist_sources.append(playlist_source)
+                    urls = [row[0] for row in db_conn.execute(
+                        'SELECT url FROM playlist_songs WHERE playlist_id = ?',
+                        (playlist['id'],))]
+                    for url in urls:
+                        playlist_source.add_location(url, -1)
 
-                # insert AmpachePlaylist source into AmpacheBrowser source
-                self._shell.append_display_page(playlist_source, self)
+                db_conn.close()
 
-                load_songs(
-                    os.path.join(
-                        self._cache_directory,
-                        f"{cache}.xml"),
-                    True,
-                    playlist_source)
+            except Exception as e:
+                print(f'error loading from cache: {e}')
 
-        def enumerate_cache_files():
-            self._caches = collections.deque()
-            for filename in os.listdir(
-                os.path.join(RB.user_cache_dir(), 'ampache')):
-                name = os.path.splitext(filename)[0]
-                if name == self._songs_cache:
-                    self._caches.appendleft(name)
-                else:
-                    self._caches.append(name)
-
-            print(f'caches: {self._caches}')
-
-            # start processing first cache
-            load_iterate()
+            self._text = None
+            self._busy = False
+            self.notify_status_changed()
+            self._shell.props.display_page_model.refilter()
 
         def handshake_cb(session_obj, result, user_data):
             cancel, parser = user_data
@@ -632,25 +652,21 @@ class AmpacheBrowser(RB.BrowserSource):
             self._handshake_auth = handshake['auth']
             self._handshake_songs = int(handshake['songs'])
 
-            # cache file mtime >= handshake newest time: load cached
+            # cache db mtime >= handshake newest time: load cached
             if not force_download and \
-                os.path.exists(self._songs_cache_filename) and \
+                os.path.exists(self._db_filename) and \
                 datetime.fromtimestamp(os.path.getmtime(
-                self._songs_cache_filename)) >= \
+                self._db_filename)) >= \
                 self._handshake_newest:
-                enumerate_cache_files()
+                load_from_cache()
             else:
-                # delete all cache files
-                for filename in os.listdir(self._cache_directory):
-                    abs_filename = os.path.join(
-                        self._cache_directory,
-                        filename)
-                    try:
-                        if os.path.isfile(abs_filename):
-                            print(f"remove cache file: {abs_filename}")
-                            os.unlink(abs_filename)
-                    except Exception as e:
-                        print(e)
+                # delete the old cache database
+                try:
+                    if os.path.exists(self._db_filename):
+                        print(f"remove cache db: {self._db_filename}")
+                        os.unlink(self._db_filename)
+                except Exception as e:
+                    print(e)
 
                 # download playlists
                 ampache_server_uri = (
@@ -737,9 +753,8 @@ class AmpacheBrowser(RB.BrowserSource):
             self._art_request = self._art_store.connect("request", self._album_art_requested)
 
             # create cache directory if it doesn't exist
-            cache_path = os.path.dirname(self._songs_cache_filename)
-            if not os.path.exists(cache_path):
-                os.mkdir(cache_path, 0o700)
+            if not os.path.exists(self._cache_directory):
+                os.mkdir(self._cache_directory, 0o700)
 
             self.update(False)
 

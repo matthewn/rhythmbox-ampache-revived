@@ -48,158 +48,158 @@ import xml.sax.handler
 class HandshakeHandler(xml.sax.handler.ContentHandler):
         def __init__(self, handshake):
                 super().__init__()
-                self.__handshake = handshake
+                self._handshake = handshake
 
         def startElement(self, name, attrs):
-                self.__text = ''
+                self._text = ''
 
         def endElement(self, name):
-                self.__handshake[name] = self.__text
+                self._handshake[name] = self._text
 
         def characters(self, content):
-                self.__text = self.__text + content
+                self._text = self._text + content
 
 class PlaylistsHandler(xml.sax.handler.ContentHandler):
         def __init__(self, playlists, user):
                 super().__init__()
-                self.__playlists = playlists
-                self.__user = user
+                self._playlists = playlists
+                self._user = user
 
         def startElement(self, name, attrs):
                 if name == 'playlist':
-                        self.__id = attrs['id']
-                        self.__name = ''
-                        self.__items = 0
-                        self.__owner = ''
-                        self.__type = ''
-                self.__text = ''
+                        self._id = attrs['id']
+                        self._name = ''
+                        self._items = 0
+                        self._owner = ''
+                        self._type = ''
+                self._text = ''
 
         def endElement(self, name):
                 if name == 'playlist':
                         # only private playlists owned by this user, or public ones
-                        if self.__owner == self.__user or self.__type == 'public':
-                                self.__playlists.append([
-                                        self.__id,
-                                        self.__name,
-                                        self.__items])
+                        if self._owner == self._user or self._type == 'public':
+                                self._playlists.append([
+                                        self._id,
+                                        self._name,
+                                        self._items])
                 elif name == 'name':
-                        self.__name = self.__text
-                elif name == 'items' and self.__text.isdigit():
-                        self.__items = int(self.__text)
+                        self._name = self._text
+                elif name == 'items' and self._text.isdigit():
+                        self._items = int(self._text)
                 elif name == 'owner':
-                        self.__owner = self.__text
+                        self._owner = self._text
                 elif name == 'type':
-                        self.__type = self.__text
+                        self._type = self._text
 
         def characters(self, content):
-                self.__text = self.__text + content
+                self._text = self._text + content
 
 class SongsHandler(xml.sax.handler.ContentHandler):
         def __init__(self, is_playlist, source, db, entry_type, albumart, auth, entries):
                 super().__init__()
-                self.__is_playlist = is_playlist
-                self.__source = source
-                self.__db = db
-                self.__entry_type = entry_type
-                self.__albumart = albumart
-                self.__auth = auth
-                self.__entries = entries
-                self.__default()
-                self.__re_auth = re.compile('\\b(auth|ssid)=[a-fA-F0-9]*')
+                self._is_playlist = is_playlist
+                self._source = source
+                self._db = db
+                self._entry_type = entry_type
+                self._albumart = albumart
+                self._auth = auth
+                self._entries = entries
+                self._default()
+                self._re_auth = re.compile('\\b(auth|ssid)=[a-fA-F0-9]*')
 
         def startElement(self, name, attrs):
                 if name == 'song':
-                        self.__id = attrs['id']
-                self.__text = ''
+                        self._id = attrs['id']
+                self._text = ''
 
         def endElement(self, name):
                 # Process the song container unconditionally; only guard field elements
-                # on self.__text to avoid acting on empty/whitespace-only nodes.
+                # on self._text to avoid acting on empty/whitespace-only nodes.
                 if name == 'song':
                         try:
-                                if self.__is_playlist:
-                                        self.__source.add_location(self.__url, -1)
+                                if self._is_playlist:
+                                        self._source.add_location(self._url, -1)
                                 else:
                                         # add the track to the database if it doesn't exist
-                                        entry = self.__db.entry_lookup_by_location(self.__url)
+                                        entry = self._db.entry_lookup_by_location(self._url)
                                         if entry is None:
                                                 entry = RB.RhythmDBEntry.new(
-                                                        self.__db, self.__entry_type, self.__url)
-                                                self.__entries.append(entry)
+                                                        self._db, self._entry_type, self._url)
+                                                self._entries.append(entry)
 
-                                                if self.__artist != '':
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.ARTIST, self.__artist)
-                                                if self.__album != '':
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.ALBUM, self.__album)
-                                                if self.__title != '':
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.TITLE, self.__title)
-                                                if self.__tag != '':
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.GENRE, self.__tag)
-                                                if self.__track != -1:
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, self.__track)
-                                                if self.__year != -1:
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.DATE, self.__year)
-                                                if self.__time != -1:
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.DURATION, self.__time)
-                                                if self.__size != -1:
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, self.__size)
-                                                if self.__rating != -1:
-                                                        self.__db.entry_set(entry, RB.RhythmDBPropType.RATING, self.__rating)
+                                                if self._artist != '':
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.ARTIST, self._artist)
+                                                if self._album != '':
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.ALBUM, self._album)
+                                                if self._title != '':
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.TITLE, self._title)
+                                                if self._tag != '':
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.GENRE, self._tag)
+                                                if self._track != -1:
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, self._track)
+                                                if self._year != -1:
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.DATE, self._year)
+                                                if self._time != -1:
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.DURATION, self._time)
+                                                if self._size != -1:
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, self._size)
+                                                if self._rating != -1:
+                                                        self._db.entry_set(entry, RB.RhythmDBPropType.RATING, self._rating)
 
-                                                if self.__art != '':
-                                                        self.__albumart[self.__artist + self.__album] = self.__art
+                                                if self._art != '':
+                                                        self._albumart[self._artist + self._album] = self._art
 
                         except Exception as e: # This happens on duplicate uris being added
                                 sys.excepthook(*sys.exc_info())
-                                print(f"Couldn't add {self.__artist} - {self.__title}", e)
+                                print(f"Couldn't add {self._artist} - {self._title}", e)
 
-                        self.__default()
+                        self._default()
 
-                elif self.__text:
+                elif self._text:
                         if name == 'url':
-                                if self.__auth: # replace ssid string with new auth string
-                                        self.__text = re.sub(self.__re_auth, r'\1='+self.__auth, self.__text)
-                                self.__url = self.__text
+                                if self._auth: # replace ssid string with new auth string
+                                        self._text = re.sub(self._re_auth, r'\1='+self._auth, self._text)
+                                self._url = self._text
                         elif name == 'artist':
-                                self.__artist = self.__text
+                                self._artist = self._text
                         elif name == 'album':
-                                self.__album = self.__text
+                                self._album = self._text
                         elif name == 'title':
-                                self.__title = self.__text
+                                self._title = self._text
                         elif name == 'tag':
-                                self.__tag = self.__text
-                        elif name == 'track' and self.__text.isdigit():
-                                self.__track = int(self.__text)
-                        elif name == 'year' and self.__text.isdigit():
-                                if (GLib.Date.valid_year(int(self.__text))):
-                                        self.__year = GLib.Date.new_dmy(1, 1, int(self.__text)).get_julian()
-                        elif name == 'time' and self.__text.isdigit():
-                                self.__time = int(self.__text)
-                        elif name == 'size' and self.__text.isdigit():
-                                self.__size = int(self.__text)
-                        elif name == 'rating' and self.__text.isdigit():
-                                self.__rating = int(self.__text)
+                                self._tag = self._text
+                        elif name == 'track' and self._text.isdigit():
+                                self._track = int(self._text)
+                        elif name == 'year' and self._text.isdigit():
+                                if (GLib.Date.valid_year(int(self._text))):
+                                        self._year = GLib.Date.new_dmy(1, 1, int(self._text)).get_julian()
+                        elif name == 'time' and self._text.isdigit():
+                                self._time = int(self._text)
+                        elif name == 'size' and self._text.isdigit():
+                                self._size = int(self._text)
+                        elif name == 'rating' and self._text.isdigit():
+                                self._rating = int(self._text)
                         elif name == 'art':
-                                if self.__auth: # replace auth string with new auth string
-                                        self.__text = re.sub(self.__re_auth, 'auth='+self.__auth, self.__text)
-                                self.__art = self.__text
+                                if self._auth: # replace auth string with new auth string
+                                        self._text = re.sub(self._re_auth, 'auth='+self._auth, self._text)
+                                self._art = self._text
 
         def characters(self, content):
-                self.__text = self.__text + content
+                self._text = self._text + content
 
-        def __default(self):
-                self.__id = -1
-                self.__url = ''
-                self.__artist = ''
-                self.__album = ''
-                self.__title = ''
-                self.__tag = ''
-                self.__track = -1
-                self.__year = -1
-                self.__time = -1
-                self.__size = -1
-                self.__rating = -1
-                self.__art = ''
+        def _default(self):
+                self._id = -1
+                self._url = ''
+                self._artist = ''
+                self._album = ''
+                self._title = ''
+                self._tag = ''
+                self._track = -1
+                self._year = -1
+                self._time = -1
+                self._size = -1
+                self._rating = -1
+                self._art = ''
 
 class AmpachePlaylist(RB.StaticPlaylistSource):
         def __init__(self, **kwargs):
@@ -212,28 +212,28 @@ class AmpacheBrowser(RB.BrowserSource):
         def __init__(self, **kwargs):
                 super().__init__(**kwargs)
 
-                self.__limit = 500
+                self._limit = 500
 
-                self.__songs_cache = '_songs'
-                self.__cache_directory = os.path.join(
+                self._songs_cache = '_songs'
+                self._cache_directory = os.path.join(
                         RB.user_cache_dir(),
                         'ampache')
-                self.__songs_cache_filename = os.path.join(
-                        self.__cache_directory,
-                        f"{self.__songs_cache}.xml")
-                self.__settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
-                self.__albumart = {}
-                self.__playlists = collections.deque()
-                self.__caches = collections.deque()
-                self.__playlist_sources = []
-                self.__entries = []
-                self.__cancellables = []
-                self.__session = Soup.Session(max_conns_per_host=20)
+                self._songs_cache_filename = os.path.join(
+                        self._cache_directory,
+                        f"{self._songs_cache}.xml")
+                self._settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
+                self._albumart = {}
+                self._playlists = collections.deque()
+                self._caches = collections.deque()
+                self._playlist_sources = []
+                self._entries = []
+                self._cancellables = []
+                self._session = Soup.Session(max_conns_per_host=20)
 
-                self.__text = None
-                self.__busy = False
+                self._text = None
+                self._busy = False
 
-                self.__activated = False
+                self._activated = False
 
                 # add action RefetchAmpache and assign callback refetch_ampache
                 app = Gio.Application.get_default()
@@ -247,30 +247,30 @@ class AmpacheBrowser(RB.BrowserSource):
                 # any un-consumed entry left from a cache-load path (which never
                 # calls download_iterate) would accumulate across calls and cause
                 # songs to be fetched multiple times.
-                self.__playlists = collections.deque([[0, self.__songs_cache]])
+                self._playlists = collections.deque([[0, self._songs_cache]])
 
                 ### download songs from Ampache server
 
                 def download_songs(uri, items, is_playlist, source, cache_filename, playlist_name):
 
                         if items <= 0:
-                                self.__text = None
-                                self.__busy = False
+                                self._text = None
+                                self._busy = False
                                 self.notify_status_changed()
                                 download_iterate()
                                 return
 
                         # Calculate all chunk offsets up front so we can fire
                         # all requests simultaneously rather than sequentially.
-                        offsets = list(range(0, items, self.__limit))
+                        offsets = list(range(0, items, self._limit))
                         num_chunks = len(offsets)
                         chunk_contents = [None] * num_chunks
                         remaining = num_chunks
                         songs_loaded = 0
                         aborted = False
 
-                        self.__text = f'Fetching {playlist_name}... (0 / {items} songs)'
-                        self.__busy = True
+                        self._text = f'Fetching {playlist_name}... (0 / {items} songs)'
+                        self._busy = True
                         self.notify_status_changed()
 
                         def songs_downloaded_cb(session_obj, result, chunk_index):
@@ -280,7 +280,7 @@ class AmpacheBrowser(RB.BrowserSource):
                                 try:
                                         contents = session_obj.send_and_read_finish(result).get_data()
                                 except Exception as e:
-                                        if self.__activated and not aborted:
+                                        if self._activated and not aborted:
                                                 aborted = True
                                                 edlg = Gtk.MessageDialog(
                                                         message_type=Gtk.MessageType.ERROR,
@@ -288,12 +288,12 @@ class AmpacheBrowser(RB.BrowserSource):
                                                         text=_('Songs response: %s') % e)
                                                 edlg.run()
                                                 edlg.destroy()
-                                                self.__activated = False
-                                                self.__text = None
-                                                self.__busy = False
+                                                self._activated = False
+                                                self._text = None
+                                                self._busy = False
                                                 self.notify_status_changed()
                                         return
-                                if aborted or not self.__activated:
+                                if aborted or not self._activated:
                                         return
 
                                 print(f"parse chunk {playlist_name}[{offsets[chunk_index]}]...")
@@ -302,11 +302,11 @@ class AmpacheBrowser(RB.BrowserSource):
                                 parser.setContentHandler(SongsHandler(
                                         is_playlist,
                                         source,
-                                        self.__db,
-                                        self.__entry_type,
-                                        self.__albumart,
-                                        self.__handshake_auth,
-                                        self.__entries))
+                                        self._db,
+                                        self._entry_type,
+                                        self._albumart,
+                                        self._handshake_auth,
+                                        self._entries))
                                 try:
                                         parser.feed(contents)
                                 except xml.sax.SAXParseException as e:
@@ -316,9 +316,9 @@ class AmpacheBrowser(RB.BrowserSource):
                                 # Commit and update the UI after each chunk so songs
                                 # appear progressively rather than all at once.
                                 if not is_playlist:
-                                        self.__db.commit()
-                                songs_loaded += min(self.__limit, items - offsets[chunk_index])
-                                self.__text = f'Fetching {playlist_name}... ({min(songs_loaded, items)} / {items} songs)'
+                                        self._db.commit()
+                                songs_loaded += min(self._limit, items - offsets[chunk_index])
+                                self._text = f'Fetching {playlist_name}... ({min(songs_loaded, items)} / {items} songs)'
                                 self.notify_status_changed()
 
                                 chunk_contents[chunk_index] = contents
@@ -343,25 +343,25 @@ class AmpacheBrowser(RB.BrowserSource):
                                 try:
                                         with open(cache_filename, 'wb') as f:
                                                 f.write(''.join(lines).encode('utf-8'))
-                                        newest_time = int(mktime(self.__handshake_newest.timetuple()))
+                                        newest_time = int(mktime(self._handshake_newest.timetuple()))
                                         # change modification time to newest time
                                         os.utime(cache_filename, (newest_time, newest_time))
                                         print(f"wrote cache file: {cache_filename}")
                                 except Exception as e:
                                         print(f"error writing cache {cache_filename}: {e}")
 
-                                self.__text = None
-                                self.__busy = False
+                                self._text = None
+                                self._busy = False
                                 self.notify_status_changed()
                                 download_iterate()
 
                         # Fire all chunk requests in parallel via Soup so the
                         # per-host connection limit applies to our session, not GIO's.
                         for i, offset in enumerate(offsets):
-                                chunk_uri = f"{uri}&offset={offset}&limit={self.__limit}"
+                                chunk_uri = f"{uri}&offset={offset}&limit={self._limit}"
                                 cancel = Gio.Cancellable()
-                                self.__cancellables.append(cancel)
-                                self.__session.send_and_read_async(
+                                self._cancellables.append(cancel)
+                                self._session.send_and_read_async(
                                         Soup.Message.new('GET', chunk_uri),
                                         GLib.PRIORITY_DEFAULT,
                                         cancel,
@@ -371,47 +371,47 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 def download_iterate():
                         try:
-                                if len(self.__playlists) > 0:
-                                        playlist = self.__playlists.popleft()
+                                if len(self._playlists) > 0:
+                                        playlist = self._playlists.popleft()
                                         print(f'process playlist: {playlist[1]}')
                                         if playlist[0] == 0:
                                                 download_songs(
-                                                        f"{self.__settings['url']}/server/xml.server.php"
-                                                        f"?action=songs&auth={self.__handshake_auth}",
-                                                        self.__handshake_songs,
+                                                        f"{self._settings['url']}/server/xml.server.php"
+                                                        f"?action=songs&auth={self._handshake_auth}",
+                                                        self._handshake_songs,
                                                         False,
                                                         self,
-                                                        self.__songs_cache_filename,
+                                                        self._songs_cache_filename,
                                                         playlist[1])
                                         else:
                                                 # create AmpachePlaylist source
                                                 playlist_source = GObject.new(
                                                         AmpachePlaylist,
                                                         is_local=False,
-                                                        shell=self.__shell,
-                                                        entry_type=self.__entry_type,
+                                                        shell=self._shell,
+                                                        entry_type=self._entry_type,
                                                         name=_(playlist[1])
                                                 )
-                                                self.__playlist_sources.append(playlist_source)
+                                                self._playlist_sources.append(playlist_source)
 
                                                 # insert AmpachePlaylist source into AmpacheBrowser source
-                                                self.__shell.append_display_page(playlist_source, self)
+                                                self._shell.append_display_page(playlist_source, self)
 
                                                 download_songs(
-                                                        f"{self.__settings['url']}/server/xml.server.php"
+                                                        f"{self._settings['url']}/server/xml.server.php"
                                                         f"?action=playlist_songs&filter={playlist[0]}"
-                                                        f"&auth={self.__handshake_auth}",
+                                                        f"&auth={self._handshake_auth}",
                                                         playlist[2],
                                                         True,
                                                         playlist_source,
                                                         os.path.join(
-                                                                self.__cache_directory,
+                                                                self._cache_directory,
                                                                 f"{playlist[1]}.xml"),
                                                         playlist[1])
 
                                 else:
                                         print('no more playlists to process, refilter display page model')
-                                        self.__shell.props.display_page_model.refilter()
+                                        self._shell.props.display_page_model.refilter()
 
                         except Exception as e:
                                 print(f'Exception: {e}')
@@ -422,16 +422,16 @@ class AmpacheBrowser(RB.BrowserSource):
                         try:
                                 contents = session_obj.send_and_read_finish(result).get_data()
                         except Exception as e:
-                                if self.__activated:
+                                if self._activated:
                                         edlg = Gtk.MessageDialog(
                                                 message_type=Gtk.MessageType.ERROR,
                                                 buttons=Gtk.ButtonsType.OK,
                                                 text=_('Playlists response: %s') % e)
                                         edlg.run()
                                         edlg.destroy()
-                                        self.__activated = False
+                                        self._activated = False
                                 return
-                        if not self.__activated:
+                        if not self._activated:
                                 return
 
                         if len(contents) <= 0:
@@ -441,17 +441,17 @@ class AmpacheBrowser(RB.BrowserSource):
                                         text=_("Playlists response size: 0\nCheck ampache server logs for cause."))
                                 edlg.run()
                                 edlg.destroy()
-                                self.__activated = False
+                                self._activated = False
 
-                                self.__text = ''
+                                self._text = ''
                                 self.notify_status_changed()
                                 return
 
                         # instantiate playlists parser
                         parser = xml.sax.make_parser()
                         parser.setContentHandler(PlaylistsHandler(
-                                self.__playlists,
-                                self.__settings['username']))
+                                self._playlists,
+                                self._settings['username']))
 
                         try:
                                 parser.feed(contents)
@@ -467,12 +467,12 @@ class AmpacheBrowser(RB.BrowserSource):
                                 try:
                                         (ok, contents, etag) = file.load_contents_finish(result)
                                 except Exception as e:
-                                        if self.__activated:
+                                        if self._activated:
                                                 RB.error_dialog(
                                                         title=_("Unable to load songs"),
                                                         message=_("Rhythmbox could not load the Ampache songs."))
                                         return
-                                if not self.__activated:
+                                if not self._activated:
                                         return
 
                                 try:
@@ -482,11 +482,11 @@ class AmpacheBrowser(RB.BrowserSource):
                                                 SongsHandler(
                                                         is_playlist,
                                                         source,
-                                                        self.__db,
-                                                        self.__entry_type,
-                                                        self.__albumart,
-                                                        self.__handshake_auth,
-                                                        self.__entries))
+                                                        self._db,
+                                                        self._entry_type,
+                                                        self._albumart,
+                                                        self._handshake_auth,
+                                                        self._entries))
 
                                         parser.feed(contents)
                                 except xml.sax.SAXParseException as e:
@@ -494,21 +494,21 @@ class AmpacheBrowser(RB.BrowserSource):
 
                                 # Commit all DB writes for this cache file in one batch
                                 if not is_playlist:
-                                        self.__db.commit()
+                                        self._db.commit()
 
-                                self.__text = None
-                                self.__busy = False
+                                self._text = None
+                                self._busy = False
                                 self.notify_status_changed()
 
                                 # load next cache
                                 load_iterate()
 
-                        self.__text = f'Load from cache "{filename}"...'
-                        self.__busy = True
+                        self._text = f'Load from cache "{filename}"...'
+                        self._busy = True
                         self.notify_status_changed()
 
                         cancel = Gio.Cancellable()
-                        self.__cancellables.append(cancel)
+                        self._cancellables.append(cancel)
                         Gio.file_new_for_path(filename).load_contents_async(
                                 cancel,
                                 songs_loaded_cb,
@@ -516,13 +516,13 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 def load_iterate():
                         try:
-                                cache = self.__caches.popleft()
+                                cache = self._caches.popleft()
 
                                 print(f'process playlist: {cache}')
 
-                                if cache == self.__songs_cache:
+                                if cache == self._songs_cache:
                                         load_songs(
-                                                self.__songs_cache_filename,
+                                                self._songs_cache_filename,
                                                 False,
                                                 self)
                                 else:
@@ -530,38 +530,38 @@ class AmpacheBrowser(RB.BrowserSource):
                                         playlist_source = GObject.new(
                                                 AmpachePlaylist,
                                                 is_local=False,
-                                                shell=self.__shell,
-                                                entry_type=self.__entry_type,
+                                                shell=self._shell,
+                                                entry_type=self._entry_type,
                                                 name=_(cache)
                                         )
-                                        self.__playlist_sources.append(playlist_source)
+                                        self._playlist_sources.append(playlist_source)
 
                                         # insert AmpachePlaylist source into AmpacheBrowser source
-                                        self.__shell.append_display_page(playlist_source, self)
+                                        self._shell.append_display_page(playlist_source, self)
 
                                         load_songs(
                                                 os.path.join(
-                                                        self.__cache_directory,
+                                                        self._cache_directory,
                                                         f"{cache}.xml"),
                                                 True,
                                                 playlist_source)
 
                         except Exception as e:
                                 print('no more playlists to process, refilter display page model')
-                                self.__shell.props.display_page_model.refilter()
+                                self._shell.props.display_page_model.refilter()
                                 return
 
                 def enumerate_cache_files():
-                        self.__caches = collections.deque()
+                        self._caches = collections.deque()
                         for filename in os.listdir(
                                 os.path.join(RB.user_cache_dir(), 'ampache')):
                                 name = os.path.splitext(filename)[0]
-                                if name == self.__songs_cache:
-                                        self.__caches.appendleft(name)
+                                if name == self._songs_cache:
+                                        self._caches.appendleft(name)
                                 else:
-                                        self.__caches.append(name)
+                                        self._caches.append(name)
 
-                        print(f'caches: {self.__caches}')
+                        print(f'caches: {self._caches}')
 
                         # start processing first cache
                         load_iterate()
@@ -570,16 +570,16 @@ class AmpacheBrowser(RB.BrowserSource):
                         try:
                                 contents = session_obj.send_and_read_finish(result).get_data()
                         except Exception as e:
-                                if self.__activated:
+                                if self._activated:
                                         edlg = Gtk.MessageDialog(
                                                 message_type=Gtk.MessageType.ERROR,
                                                 buttons=Gtk.ButtonsType.OK,
                                                 text=_('Handshake response: %s') % e)
                                         edlg.run()
                                         edlg.destroy()
-                                        self.__activated = False
+                                        self._activated = False
                                 return
-                        if not self.__activated:
+                        if not self._activated:
                                 return
 
                         if len(contents) <= 0:
@@ -589,9 +589,9 @@ class AmpacheBrowser(RB.BrowserSource):
                                         text=_("Handshake response size: 0\nCheck ampache server logs for cause."))
                                 edlg.run()
                                 edlg.destroy()
-                                self.__activated = False
+                                self._activated = False
 
-                                self.__text = ''
+                                self._text = ''
                                 self.notify_status_changed()
                                 return
 
@@ -604,33 +604,33 @@ class AmpacheBrowser(RB.BrowserSource):
                         handshake_update = datetime.strptime(
                                 handshake['update'][0:18],
                                 '%Y-%m-%dT%H:%M:%S')
-                        self.__handshake_newest = handshake_update
+                        self._handshake_newest = handshake_update
                         handshake_add = datetime.strptime(
                                 handshake['add'][0:18],
                                 '%Y-%m-%dT%H:%M:%S')
-                        if handshake_add > self.__handshake_newest:
-                                self.__handshake_newest = handshake_add
+                        if handshake_add > self._handshake_newest:
+                                self._handshake_newest = handshake_add
                         handshake_clean = datetime.strptime(
                                 handshake['clean'][0:18],
                                 '%Y-%m-%dT%H:%M:%S')
-                        if handshake_clean > self.__handshake_newest:
-                                self.__handshake_newest = handshake_clean
+                        if handshake_clean > self._handshake_newest:
+                                self._handshake_newest = handshake_clean
 
-                        self.__handshake_auth = handshake['auth']
-                        self.__handshake_songs = int(handshake['songs'])
+                        self._handshake_auth = handshake['auth']
+                        self._handshake_songs = int(handshake['songs'])
 
                         # cache file mtime >= handshake newest time: load cached
                         if not force_download and \
-                                os.path.exists(self.__songs_cache_filename) and \
+                                os.path.exists(self._songs_cache_filename) and \
                                 datetime.fromtimestamp(os.path.getmtime(
-                                self.__songs_cache_filename)) >= \
-                                self.__handshake_newest:
+                                self._songs_cache_filename)) >= \
+                                self._handshake_newest:
                                 enumerate_cache_files()
                         else:
                                 # delete all cache files
-                                for filename in os.listdir(self.__cache_directory):
+                                for filename in os.listdir(self._cache_directory):
                                         abs_filename = os.path.join(
-                                                self.__cache_directory,
+                                                self._cache_directory,
                                                 filename)
                                         try:
                                                 if os.path.isfile(abs_filename):
@@ -641,11 +641,11 @@ class AmpacheBrowser(RB.BrowserSource):
 
                                 # download playlists
                                 ampache_server_uri = (
-                                        f"{self.__settings['url']}/server/xml.server.php"
-                                        f"?action=playlists&auth={self.__handshake_auth}")
+                                        f"{self._settings['url']}/server/xml.server.php"
+                                        f"?action=playlists&auth={self._handshake_auth}")
                                 cancel = Gio.Cancellable()
-                                self.__cancellables.append(cancel)
-                                self.__session.send_and_read_async(
+                                self._cancellables.append(cancel)
+                                self._session.send_and_read_async(
                                         Soup.Message.new('GET', ampache_server_uri),
                                         GLib.PRIORITY_DEFAULT,
                                         cancel,
@@ -654,27 +654,27 @@ class AmpacheBrowser(RB.BrowserSource):
                                 print(f"downloading playlists: {ampache_server_uri}")
 
                 # check for errors
-                if not self.__settings['url']:
+                if not self._settings['url']:
                         edlg = Gtk.MessageDialog(
                                 message_type=Gtk.MessageType.ERROR,
                                 buttons=Gtk.ButtonsType.OK,
                                 text=_('URL missing'))
                         edlg.run()
                         edlg.destroy()
-                        self.__activated = False
+                        self._activated = False
                         return
 
-                if not self.__settings['password']:
+                if not self._settings['password']:
                         edlg = Gtk.MessageDialog(
                                 message_type=Gtk.MessageType.ERROR,
                                 buttons=Gtk.ButtonsType.OK,
                                 text=_('Password missing'))
                         edlg.run()
                         edlg.destroy()
-                        self.__activated = False
+                        self._activated = False
                         return
 
-                self.__text = 'Update songs...'
+                self._text = 'Update songs...'
                 self.notify_status_changed()
 
                 handshake = {}
@@ -684,26 +684,26 @@ class AmpacheBrowser(RB.BrowserSource):
                 parser.setContentHandler(HandshakeHandler(handshake))
 
                 # build handshake url
-                if self.__settings['username'] != '':
+                if self._settings['username'] != '':
                         # username/password provided
                         timestamp = int(time.time())
-                        password = hashlib.sha256(self.__settings['password'].encode('utf-8')).hexdigest()
+                        password = hashlib.sha256(self._settings['password'].encode('utf-8')).hexdigest()
                         authkey = hashlib.sha256((str(timestamp) + password).encode('utf-8')).hexdigest()
 
                         ampache_server_uri = (
-                                f"{self.__settings['url']}/server/xml.server.php"
+                                f"{self._settings['url']}/server/xml.server.php"
                                 f"?action=handshake&auth={authkey}&timestamp={timestamp}"
-                                f"&user={self.__settings['username']}&version=350001")
+                                f"&user={self._settings['username']}&version=350001")
                 else:
                         # api key provided
                         ampache_server_uri = (
-                                f"{self.__settings['url']}/server/xml.server.php"
-                                f"?action=handshake&auth={self.__settings['password']}&version=350001")
+                                f"{self._settings['url']}/server/xml.server.php"
+                                f"?action=handshake&auth={self._settings['password']}&version=350001")
 
                 # execute handshake
                 cancel = Gio.Cancellable()
-                self.__cancellables.append(cancel)
-                self.__session.send_and_read_async(
+                self._cancellables.append(cancel)
+                self._session.send_and_read_async(
                         Soup.Message.new('GET', ampache_server_uri),
                         GLib.PRIORITY_DEFAULT,
                         cancel,
@@ -714,19 +714,19 @@ class AmpacheBrowser(RB.BrowserSource):
         # Source is activated
         def do_activate(self):
                 # activate source if inactive
-                if not self.__activated:
-                        self.__activated = True
+                if not self._activated:
+                        self._activated = True
 
-                        self.__shell = self.props.shell
-                        self.__db = self.__shell.props.db
-                        self.__entry_type = self.props.entry_type
+                        self._shell = self.props.shell
+                        self._db = self._shell.props.db
+                        self._entry_type = self.props.entry_type
 
                         # connect playing-song-changed signal
-                        self.__art_store = RB.ExtDB(name="album-art")
-                        self.__art_request = self.__art_store.connect("request", self.__album_art_requested)
+                        self._art_store = RB.ExtDB(name="album-art")
+                        self._art_request = self._art_store.connect("request", self._album_art_requested)
 
                         # create cache directory if it doesn't exist
-                        cache_path = os.path.dirname(self.__songs_cache_filename)
+                        cache_path = os.path.dirname(self._songs_cache_filename)
                         if not os.path.exists(cache_path):
                                 os.mkdir(cache_path, 0o700)
 
@@ -736,10 +736,10 @@ class AmpacheBrowser(RB.BrowserSource):
         def do_selected(self):
                 self.do_activate()
 
-        def __album_art_requested(self, store, key, last_time):
+        def _album_art_requested(self, store, key, last_time):
                 artist = key.get_field('artist')
                 album = key.get_field('album')
-                uri = self.__albumart.get(artist + album)
+                uri = self._albumart.get(artist + album)
                 print(f'album art uri: {uri}')
                 if uri:
                         storekey = RB.ExtDBKey.create_storage('album', album)
@@ -747,18 +747,18 @@ class AmpacheBrowser(RB.BrowserSource):
                         store.store_uri(storekey, RB.ExtDBSourceType.SEARCH, uri)
 
         def do_get_status(self, text, busy):
-                return (self.__text, self.__busy)
+                return (self._text, self._busy)
 
         def clean_db(self):
                 # remove playlists
-                for playlist_source in self.__playlist_sources:
+                for playlist_source in self._playlist_sources:
                         # delete Playlist source
                         playlist_source.delete_thyself()
-                self.__playlist_sources = []
-                self.__entries = []
+                self._playlist_sources = []
+                self._entries = []
 
-                self.__db.entry_delete_by_type(self.__entry_type)
-                self.__db.commit()
+                self._db.entry_delete_by_type(self._entry_type)
+                self._db.commit()
 
         def refetch_ampache(self, parameter, user_data):
                 self.clean_db()
@@ -766,18 +766,18 @@ class AmpacheBrowser(RB.BrowserSource):
 
         def do_delete_thyself(self):
 
-                if self.__activated:
-                        self.__activated = False
+                if self._activated:
+                        self._activated = False
 
                         # Cancel all pending async operations so their callbacks
                         # see the False flag and return without touching GObjects.
-                        for cancel in self.__cancellables:
+                        for cancel in self._cancellables:
                                 cancel.cancel()
-                        self.__cancellables = []
+                        self._cancellables = []
 
-                        if self.__art_store is not None:
-                                self.__art_store.disconnect(self.__art_request)
-                                self.__art_store = None
+                        if self._art_store is not None:
+                                self._art_store.disconnect(self._art_request)
+                                self._art_store = None
 
                         # Drop references.  Do NOT call playlist_source.delete_thyself()
                         # here — Rhythmbox removes child display pages automatically when
@@ -790,8 +790,8 @@ class AmpacheBrowser(RB.BrowserSource):
                         # SIGSEGV in rb_entry_view_have_selection.  Since entries are
                         # registered with save_to_disk=False they never persist to disk,
                         # so skipping this call is safe on exit.
-                        self.__playlist_sources = []
-                        self.__entries = []
+                        self._playlist_sources = []
+                        self._entries = []
 
                 RB.BrowserSource.do_delete_thyself(self)
 

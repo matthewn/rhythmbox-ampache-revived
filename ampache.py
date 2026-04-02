@@ -62,8 +62,8 @@ class Ampache(GObject.Object, Peas.Activatable):
                 icon = GdkPixbuf.Pixbuf.new_from_file_at_size(ico_path, width, height) if os.path.exists(ico_path) else None
 
                 # register AmpacheEntryType
-                self.__entry_type = AmpacheEntryType()
-                db.register_entry_type(self.__entry_type)
+                self._entry_type = AmpacheEntryType()
+                db.register_entry_type(self._entry_type)
 
                 # fetch plugin settings
                 settings = Gio.Settings("org.gnome.rhythmbox.plugins.ampache")
@@ -72,33 +72,33 @@ class Ampache(GObject.Object, Peas.Activatable):
                 menu.append('Refetch Ampache Library', 'app.refetch-ampache')
 
                 # create AmpacheBrowser source
-                self.__source = GObject.new(
+                self._source = GObject.new(
                         AmpacheBrowser,
                         shell=shell,
-                        entry_type=self.__entry_type,
+                        entry_type=self._entry_type,
                         icon=icon,
                         plugin=self,
                         settings=settings.get_child("source"),
                         toolbar_menu=menu,
                         name=_("Ampache")
                 )
-                self.__first = 1
+                self._first = 1
 
                 # assign AmpacheEntryType to AmpacheBrowser source
                 shell.register_entry_type_for_source(
-                        self.__source,
-                        self.__entry_type)
+                        self._source,
+                        self._entry_type)
 
 
                 # insert AmpacheBrowser source into Shared group
                 shell.append_display_page(
-                        self.__source,
+                        self._source,
                         RB.DisplayPageGroup.get_by_id("shared"))
 
         def do_deactivate(self):
                 # destroy AmpacheBrowser source
-                self.__source.delete_thyself()
-                self.__source = None
+                self._source.delete_thyself()
+                self._source = None
 
                 # destroy entry type
-                self.__entry_type = None
+                self._entry_type = None

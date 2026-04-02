@@ -48,7 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from AmpacheBrowser import (
     HandshakeHandler, PlaylistsHandler, SongsHandler,
-    songs_to_rhythmdb, _open_db,
+    songs_to_rhythmdb, _open_db, _read_meta, _write_meta,
     _INSERT_SONG_SQL, _INSERT_PLAYLIST_SQL, _INSERT_PLAYLIST_SONG_SQL,
 )
 
@@ -305,6 +305,45 @@ class TestSongsHandler(unittest.TestCase):
         parse_xml(handler, xml)
         self.assertEqual(handler.songs[0]['year'], -1)
 
+    def test_year_boundary_min(self):
+        xml = ('<?xml version="1.0"?><root><song id="1">'
+               '<title>Min Year</title>'
+               '<url>http://example.com/min.mp3</url>'
+               '<year>1</year></song></root>')
+        handler = SongsHandler(None)
+        parse_xml(handler, xml)
+        self.assertEqual(handler.songs[0]['year'], 1)
+
+    def test_year_boundary_max(self):
+        xml = ('<?xml version="1.0"?><root><song id="1">'
+               '<title>Max Year</title>'
+               '<url>http://example.com/max.mp3</url>'
+               '<year>9999</year></song></root>')
+        handler = SongsHandler(None)
+        parse_xml(handler, xml)
+        self.assertEqual(handler.songs[0]['year'], 9999)
+
+    def test_year_above_max_ignored(self):
+        xml = ('<?xml version="1.0"?><root><song id="1">'
+               '<title>Too High</title>'
+               '<url>http://example.com/toohigh.mp3</url>'
+               '<year>10000</year></song></root>')
+        handler = SongsHandler(None)
+        parse_xml(handler, xml)
+        self.assertEqual(handler.songs[0]['year'], -1)
+
+    def test_song_with_no_url_skipped(self):
+        """A <song> element with no <url> child must not appear in songs."""
+        xml = ('<?xml version="1.0"?><root>'
+               '<song id="1"><title>No URL</title></song>'
+               '<song id="2"><title>Has URL</title>'
+               '<url>http://example.com/ok.mp3</url></song>'
+               '</root>')
+        handler = SongsHandler(None)
+        parse_xml(handler, xml)
+        self.assertEqual(len(handler.songs), 1)
+        self.assertEqual(handler.songs[0]['title'], 'Has URL')
+
 
 # ---------------------------------------------------------------------------
 # songs_to_rhythmdb()
@@ -417,6 +456,34 @@ class TestSongsToRhythmdb(unittest.TestCase):
         songs_to_rhythmdb(_SONG_DICTS, {}, db, MagicMock(), False, None, entries)
         self.assertEqual(len(entries), 0)
         _RB.RhythmDBEntry.new.assert_not_called()
+
+    def test_update_existing_refreshes_metadata(self):
+        """With update_existing=True, metadata is written to already-known entries."""
+        existing_entry = MagicMock()
+        db = MagicMock()
+        db.entry_lookup_by_location.return_value = existing_entry
+        _RB.RhythmDBEntry.new.reset_mock()
+        entries = []
+        songs_to_rhythmdb(
+            _SONG_DICTS[:1], {}, db, MagicMock(),
+            False, None, entries, update_existing=True)
+        # No new entry should be created
+        _RB.RhythmDBEntry.new.assert_not_called()
+        self.assertEqual(len(entries), 0)
+        # Metadata should have been written to the existing entry
+        set_props = {c.args[1] for c in db.entry_set.call_args_list}
+        self.assertIn(_RB.RhythmDBPropType.TITLE, set_props)
+        self.assertIn(_RB.RhythmDBPropType.ARTIST, set_props)
+
+    def test_update_existing_false_skips_existing_metadata(self):
+        """With update_existing=False (default), no metadata is set on existing entries."""
+        db = MagicMock()
+        db.entry_lookup_by_location.return_value = MagicMock()
+        entries = []
+        songs_to_rhythmdb(
+            _SONG_DICTS[:1], {}, db, MagicMock(),
+            False, None, entries, update_existing=False)
+        db.entry_set.assert_not_called()
 
     def test_playlist_mode_calls_add_location(self):
         source = MagicMock()
@@ -590,6 +657,90 @@ class TestSQLiteRoundtrip(unittest.TestCase):
             'http://example.com/cache.mp3',
             'http://example.com/second.mp3',
         ])
+
+
+# ---------------------------------------------------------------------------
+# meta table helpers (_read_meta, _write_meta, _open_db schema migration)
+# ---------------------------------------------------------------------------
+
+class TestMeta(unittest.TestCase):
+    """Tests for _read_meta, _write_meta, and meta table creation in _open_db."""
+
+    def setUp(self):
+        fd, self.tmp_path = tempfile.mkstemp(suffix='.sqlite')
+        os.close(fd)
+        self.conn = _open_db(self.tmp_path)
+
+    def tearDown(self):
+        self.conn.close()
+        if os.path.exists(self.tmp_path):
+            os.unlink(self.tmp_path)
+
+    def test_meta_table_exists_after_open_db(self):
+        tables = {row[0] for row in self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn('meta', tables)
+
+    def test_read_meta_missing_key_returns_none(self):
+        self.assertIsNone(_read_meta(self.conn, 'nonexistent'))
+
+    def test_write_and_read_meta(self):
+        _write_meta(self.conn, 'last_add', '2024-03-01T12:00:00+00:00')
+        self.conn.commit()
+        self.assertEqual(
+            _read_meta(self.conn, 'last_add'),
+            '2024-03-01T12:00:00+00:00')
+
+    def test_write_meta_upserts(self):
+        _write_meta(self.conn, 'last_clean', 'first')
+        _write_meta(self.conn, 'last_clean', 'second')
+        self.conn.commit()
+        self.assertEqual(_read_meta(self.conn, 'last_clean'), 'second')
+
+    def test_multiple_keys_independent(self):
+        _write_meta(self.conn, 'last_add',    'add_val')
+        _write_meta(self.conn, 'last_update', 'update_val')
+        _write_meta(self.conn, 'last_clean',  'clean_val')
+        self.conn.commit()
+        self.assertEqual(_read_meta(self.conn, 'last_add'),    'add_val')
+        self.assertEqual(_read_meta(self.conn, 'last_update'), 'update_val')
+        self.assertEqual(_read_meta(self.conn, 'last_clean'),  'clean_val')
+
+    def test_meta_persists_across_connections(self):
+        _write_meta(self.conn, 'last_add', 'persistent')
+        self.conn.commit()
+        self.conn.close()
+        conn2 = _open_db(self.tmp_path)
+        self.assertEqual(_read_meta(conn2, 'last_add'), 'persistent')
+        conn2.close()
+        self.conn = _open_db(self.tmp_path)  # keep tearDown happy
+
+    def test_open_db_adds_meta_to_legacy_db(self):
+        """Simulate a pre-meta-table database: _open_db must create the table."""
+        import sqlite3 as _sqlite3
+        fd, legacy_path = tempfile.mkstemp(suffix='.sqlite')
+        os.close(fd)
+        try:
+            # Create a db with only the old tables (no meta)
+            legacy_conn = _sqlite3.connect(legacy_path)
+            legacy_conn.executescript("""
+                CREATE TABLE IF NOT EXISTS songs (url TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS playlists (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS playlist_songs (playlist_id TEXT, url TEXT);
+            """)
+            legacy_conn.commit()
+            legacy_conn.close()
+
+            # _open_db should add the meta table without destroying existing data
+            conn = _open_db(legacy_path)
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn('meta', tables)
+            self.assertIn('songs', tables)
+            conn.close()
+        finally:
+            if os.path.exists(legacy_path):
+                os.unlink(legacy_path)
 
 
 if __name__ == '__main__':

@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS playlist_songs (
     playlist_id TEXT NOT NULL,
     url         TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 _INSERT_SONG_SQL = """
@@ -96,41 +100,60 @@ def _open_db(path):
     return conn
 
 
-def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source, entries):
-    """Write a list of song dicts into RhythmDB (or a playlist source)."""
+def _read_meta(conn, key):
+    """Return the value stored under key in the meta table, or None."""
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _write_meta(conn, key, value):
+    """Upsert a key/value pair in the meta table."""
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+
+def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
+                      entries, update_existing=False):
+    """Write a list of song dicts into RhythmDB (or a playlist source).
+
+    When update_existing is True, metadata on already-known URLs is refreshed
+    rather than skipped.  This is used by the incremental update path.
+    """
     for song in songs:
         try:
             if is_playlist:
                 source.add_location(song['url'], -1)
             else:
-                # add the track to the database if it doesn't exist
                 entry = db.entry_lookup_by_location(song['url'])
                 if entry is None:
                     entry = RB.RhythmDBEntry.new(db, entry_type, song['url'])
                     entries.append(entry)
+                elif not update_existing:
+                    continue
 
-                    if song['artist']:
-                        db.entry_set(entry, RB.RhythmDBPropType.ARTIST, song['artist'])
-                    if song['album']:
-                        db.entry_set(entry, RB.RhythmDBPropType.ALBUM, song['album'])
-                    if song['title']:
-                        db.entry_set(entry, RB.RhythmDBPropType.TITLE, song['title'])
-                    if song['tag']:
-                        db.entry_set(entry, RB.RhythmDBPropType.GENRE, song['tag'])
-                    if song['track'] != -1:
-                        db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, song['track'])
-                    if song['year'] != -1:
-                        julian = GLib.Date.new_dmy(1, 1, song['year']).get_julian()
-                        db.entry_set(entry, RB.RhythmDBPropType.DATE, julian)
-                    if song['time'] != -1:
-                        db.entry_set(entry, RB.RhythmDBPropType.DURATION, song['time'])
-                    if song['size'] != -1:
-                        db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, song['size'])
-                    if song['rating'] != -1:
-                        db.entry_set(entry, RB.RhythmDBPropType.RATING, song['rating'])
+                if song['artist']:
+                    db.entry_set(entry, RB.RhythmDBPropType.ARTIST, song['artist'])
+                if song['album']:
+                    db.entry_set(entry, RB.RhythmDBPropType.ALBUM, song['album'])
+                if song['title']:
+                    db.entry_set(entry, RB.RhythmDBPropType.TITLE, song['title'])
+                if song['tag']:
+                    db.entry_set(entry, RB.RhythmDBPropType.GENRE, song['tag'])
+                if song['track'] != -1:
+                    db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, song['track'])
+                if song['year'] != -1:
+                    julian = GLib.Date.new_dmy(1, 1, song['year']).get_julian()
+                    db.entry_set(entry, RB.RhythmDBPropType.DATE, julian)
+                if song['time'] != -1:
+                    db.entry_set(entry, RB.RhythmDBPropType.DURATION, song['time'])
+                if song['size'] != -1:
+                    db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, song['size'])
+                if song['rating'] != -1:
+                    db.entry_set(entry, RB.RhythmDBPropType.RATING, song['rating'])
 
-                    if song['art']:
-                        albumart[song['artist'] + song['album']] = song['art']
+                if song['art']:
+                    albumart[song['artist'] + song['album']] = song['art']
 
         except Exception as e:  # This happens on duplicate uris being added
             sys.excepthook(*sys.exc_info())
@@ -304,7 +327,7 @@ class AmpacheBrowser(RB.BrowserSource):
         self._settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
         self._albumart = {}
         self._playlists = collections.deque()
-        self._playlist_sources = []
+        self._playlist_sources = {}   # {playlist_id: source}
         self._entries = []
         self._cancellables = set()
         self._session = Soup.Session(max_conns_per_host=20)
@@ -338,7 +361,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
         ### download songs from Ampache server
 
-        # conn is opened in playlists_cb (when we know a download is needed)
+        # conn is opened in playlists_cb (when we know a full download is needed)
         # and closed in download_iterate (when the queue is exhausted).
         conn = None
 
@@ -465,7 +488,7 @@ class AmpacheBrowser(RB.BrowserSource):
                             entry_type=self._entry_type,
                             name=_(playlist[1])
                         )
-                        self._playlist_sources.append(playlist_source)
+                        self._playlist_sources[str(playlist[0])] = playlist_source
 
                         # insert AmpachePlaylist source into AmpacheBrowser source
                         self._shell.append_display_page(playlist_source, self)
@@ -485,8 +508,12 @@ class AmpacheBrowser(RB.BrowserSource):
                             playlist[1])
 
                 else:
-                    # All playlists downloaded — seal the cache and finish.
+                    # All playlists downloaded — write meta, seal the cache, and finish.
                     newest_time = int(time.mktime(self._handshake_newest.timetuple()))
+                    _write_meta(conn, 'last_add',    handshake['add'])
+                    _write_meta(conn, 'last_update', handshake['update'])
+                    _write_meta(conn, 'last_clean',  handshake['clean'])
+                    conn.commit()
                     conn.close()
                     conn = None
                     # change modification time to newest time
@@ -576,7 +603,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         entry_type=self._entry_type,
                         name=_(playlist['name'])
                     )
-                    self._playlist_sources.append(playlist_source)
+                    self._playlist_sources[playlist['id']] = playlist_source
 
                     # insert AmpachePlaylist source into AmpacheBrowser source
                     self._shell.append_display_page(playlist_source, self)
@@ -596,6 +623,219 @@ class AmpacheBrowser(RB.BrowserSource):
             self._busy = False
             self.notify_status_changed()
             self._shell.props.display_page_model.refilter()
+
+        ### incremental update (add/update timestamps changed, clean unchanged)
+
+        def incremental_update(new_add, new_update, new_clean, stored_add, stored_update):
+            """Fetch only songs added/updated since the last sync, then diff playlists."""
+            _conn = _open_db(self._db_filename)
+
+            # Sequential chunk fetcher — used for both delta songs and playlist songs.
+            # Fires one chunk at a time, stopping when the response is smaller than
+            # the limit (no need to know the total count upfront).
+            def fetch_songs_sequential(uri_base, on_done):
+                offset = [0]
+                all_songs = []
+                all_albumart = {}
+
+                def fetch_one():
+                    chunk_uri = f"{uri_base}&offset={offset[0]}&limit={self._limit}"
+                    cancel = Gio.Cancellable()
+                    self._cancellables.add(cancel)
+                    self._session.send_and_read_async(
+                        Soup.Message.new('GET', chunk_uri),
+                        GLib.PRIORITY_DEFAULT,
+                        cancel, chunk_cb, cancel)
+
+                def chunk_cb(session_obj, result, cancel):
+                    self._cancellables.discard(cancel)
+                    if not self._activated:
+                        return
+                    try:
+                        contents = session_obj.send_and_read_finish(result).get_data()
+                    except Exception as e:
+                        print(f"incremental chunk error: {e}")
+                        on_done(all_songs, all_albumart)
+                        return
+
+                    handler = SongsHandler(self._handshake_auth)
+                    parser = xml.sax.make_parser()
+                    parser.setContentHandler(handler)
+                    try:
+                        parser.feed(contents)
+                    except xml.sax.SAXParseException as e:
+                        print(f"error parsing incremental songs: {e}")
+
+                    all_songs.extend(handler.songs)
+                    all_albumart.update(handler.albumart)
+                    offset[0] += self._limit
+
+                    if len(handler.songs) < self._limit:
+                        on_done(all_songs, all_albumart)
+                    else:
+                        fetch_one()
+
+                fetch_one()
+
+            # Build the queue of delta-song fetches needed.
+            base = f"{self._settings['url']}/server/xml.server.php"
+            auth = self._handshake_auth
+            fetch_queue = collections.deque()
+            if new_add != stored_add:
+                # Truncate to 19 chars (drop timezone suffix) for URL param
+                fetch_queue.append((
+                    f"{base}?action=songs&auth={auth}&add={stored_add[:19]}",
+                    'new songs'))
+            if new_update != stored_update:
+                fetch_queue.append((
+                    f"{base}?action=songs&auth={auth}&update={stored_update[:19]}",
+                    'updated songs'))
+
+            def run_next_delta():
+                if not fetch_queue:
+                    fetch_incremental_playlists()
+                    return
+                uri, label = fetch_queue.popleft()
+                self._text = f'Fetching {label}...'
+                self.notify_status_changed()
+                print(f"incremental fetch: {uri}")
+
+                def on_songs_done(songs, albumart):
+                    print(f"incremental: {len(songs)} {label}")
+                    songs_to_rhythmdb(
+                        songs, self._albumart,
+                        self._db, self._entry_type,
+                        False, self, self._entries,
+                        update_existing=True)
+                    self._db.commit()
+                    self._albumart.update(albumart)
+                    _conn.executemany(_INSERT_SONG_SQL, songs)
+                    _conn.commit()
+                    run_next_delta()
+
+                fetch_songs_sequential(uri, on_songs_done)
+
+            def fetch_incremental_playlists():
+                pl_uri = (f"{self._settings['url']}/server/xml.server.php"
+                          f"?action=playlists&auth={self._handshake_auth}")
+                cancel = Gio.Cancellable()
+                self._cancellables.add(cancel)
+                self._session.send_and_read_async(
+                    Soup.Message.new('GET', pl_uri),
+                    GLib.PRIORITY_DEFAULT,
+                    cancel, playlists_fetched_cb, cancel)
+
+            def playlists_fetched_cb(session_obj, result, cancel):
+                self._cancellables.discard(cancel)
+                if not self._activated:
+                    return
+                try:
+                    contents = session_obj.send_and_read_finish(result).get_data()
+                except Exception as e:
+                    print(f"incremental playlists error: {e}")
+                    finish_incremental()
+                    return
+
+                new_playlists_list = []
+                parser = xml.sax.make_parser()
+                parser.setContentHandler(PlaylistsHandler(
+                    new_playlists_list, self._settings['username']))
+                try:
+                    parser.feed(contents)
+                except xml.sax.SAXParseException as e:
+                    print(f"error parsing incremental playlists: {e}")
+
+                # id → [id, name, items]
+                new_pl = {str(p[0]): p for p in new_playlists_list}
+                stored_pl = {row['id']: row['name'] for row in
+                             _conn.execute('SELECT id, name FROM playlists')}
+
+                # Remove deleted playlists
+                for pid in list(stored_pl.keys()):
+                    if pid not in new_pl:
+                        src = self._playlist_sources.pop(pid, None)
+                        if src is not None:
+                            src.delete_thyself()
+                        _conn.execute('DELETE FROM playlists WHERE id = ?', (pid,))
+                        _conn.execute(
+                            'DELETE FROM playlist_songs WHERE playlist_id = ?', (pid,))
+
+                # Determine which playlists need a song re-fetch (new or name-changed)
+                to_fetch = collections.deque()
+                for pid, pl in new_pl.items():
+                    if pid not in stored_pl:
+                        # New playlist — create source
+                        pl_source = GObject.new(
+                            AmpachePlaylist,
+                            is_local=False,
+                            shell=self._shell,
+                            entry_type=self._entry_type,
+                            name=_(pl[1]))
+                        self._playlist_sources[pid] = pl_source
+                        self._shell.append_display_page(pl_source, self)
+                        _conn.execute(_INSERT_PLAYLIST_SQL, (pid, pl[1]))
+                        to_fetch.append(pl)
+                    elif stored_pl[pid] != pl[1]:
+                        # Name changed — update stored name, clear and re-fetch songs
+                        _conn.execute(_INSERT_PLAYLIST_SQL, (pid, pl[1]))
+                        _conn.execute(
+                            'DELETE FROM playlist_songs WHERE playlist_id = ?', (pid,))
+                        to_fetch.append(pl)
+
+                _conn.commit()
+
+                def fetch_next_playlist():
+                    if not to_fetch:
+                        finish_incremental()
+                        return
+                    pl = to_fetch.popleft()
+                    pid = str(pl[0])
+                    source = self._playlist_sources.get(pid)
+                    if source is None:
+                        fetch_next_playlist()
+                        return
+                    pl_uri = (f"{self._settings['url']}/server/xml.server.php"
+                              f"?action=playlist_songs&filter={pid}"
+                              f"&auth={self._handshake_auth}")
+
+                    def on_pl_songs_done(songs, albumart):
+                        songs_to_rhythmdb(
+                            songs, self._albumart,
+                            self._db, self._entry_type,
+                            True, source, self._entries)
+                        _conn.executemany(
+                            _INSERT_PLAYLIST_SONG_SQL,
+                            [(pid, s['url']) for s in songs])
+                        _conn.commit()
+                        fetch_next_playlist()
+
+                    fetch_songs_sequential(pl_uri, on_pl_songs_done)
+
+                fetch_next_playlist()
+
+            def finish_incremental():
+                nonlocal _conn
+                _write_meta(_conn, 'last_add',    new_add)
+                _write_meta(_conn, 'last_update', new_update)
+                _write_meta(_conn, 'last_clean',  new_clean)
+                _conn.commit()
+                newest_time = int(time.mktime(self._handshake_newest.timetuple()))
+                _conn.close()
+                _conn = None
+                os.utime(self._db_filename, (newest_time, newest_time))
+                print('incremental update complete')
+                self._text = None
+                self._busy = False
+                self.notify_status_changed()
+                self._shell.props.display_page_model.refilter()
+
+            # Kick off: load existing cache into RhythmDB first so the
+            # user sees their library immediately, then fetch the delta.
+            load_from_cache()
+            self._text = 'Updating library...'
+            self._busy = True
+            self.notify_status_changed()
+            run_next_delta()
 
         def handshake_cb(session_obj, result, user_data):
             cancel, parser = user_data
@@ -635,16 +875,16 @@ class AmpacheBrowser(RB.BrowserSource):
 
             # convert handshake update time into datetime
             handshake_update = datetime.strptime(
-                handshake['update'][0:18],
+                handshake['update'][0:19],
                 '%Y-%m-%dT%H:%M:%S')
             self._handshake_newest = handshake_update
             handshake_add = datetime.strptime(
-                handshake['add'][0:18],
+                handshake['add'][0:19],
                 '%Y-%m-%dT%H:%M:%S')
             if handshake_add > self._handshake_newest:
                 self._handshake_newest = handshake_add
             handshake_clean = datetime.strptime(
-                handshake['clean'][0:18],
+                handshake['clean'][0:19],
                 '%Y-%m-%dT%H:%M:%S')
             if handshake_clean > self._handshake_newest:
                 self._handshake_newest = handshake_clean
@@ -652,14 +892,31 @@ class AmpacheBrowser(RB.BrowserSource):
             self._handshake_auth = handshake['auth']
             self._handshake_songs = int(handshake['songs'])
 
-            # cache db mtime >= handshake newest time: load cached
-            if not force_download and \
-                os.path.exists(self._db_filename) and \
-                datetime.fromtimestamp(os.path.getmtime(
-                self._db_filename)) >= \
-                self._handshake_newest:
-                load_from_cache()
-            else:
+            new_add   = handshake['add']
+            new_update = handshake['update']
+            new_clean  = handshake['clean']
+
+            # Read stored timestamps from the meta table (if the db exists)
+            stored_add = stored_update = stored_clean = None
+            if os.path.exists(self._db_filename):
+                _meta_conn = _open_db(self._db_filename)
+                stored_add   = _read_meta(_meta_conn, 'last_add')
+                stored_update = _read_meta(_meta_conn, 'last_update')
+                stored_clean  = _read_meta(_meta_conn, 'last_clean')
+                _meta_conn.close()
+
+            # Three-way decision:
+            #   (a) full refetch  — clean changed, meta missing, or forced
+            #   (b) incremental   — only add/update timestamps changed
+            #   (c) load cache    — nothing changed
+            needs_full = (
+                force_download or
+                not os.path.exists(self._db_filename) or
+                stored_clean is None or stored_add is None or stored_update is None or
+                new_clean != stored_clean
+            )
+
+            if needs_full:
                 # delete the old cache database
                 try:
                     if os.path.exists(self._db_filename):
@@ -681,6 +938,13 @@ class AmpacheBrowser(RB.BrowserSource):
                     playlists_cb,
                     cancel)
                 print(f"downloading playlists: {ampache_server_uri}")
+
+            elif new_add == stored_add and new_update == stored_update:
+                load_from_cache()
+
+            else:
+                incremental_update(new_add, new_update, new_clean,
+                                   stored_add, stored_update)
 
         # check for errors
         if not self._settings['url']:
@@ -777,10 +1041,10 @@ class AmpacheBrowser(RB.BrowserSource):
 
     def clean_db(self):
         # remove playlists
-        for playlist_source in self._playlist_sources:
+        for playlist_source in self._playlist_sources.values():
             # delete Playlist source
             playlist_source.delete_thyself()
-        self._playlist_sources = []
+        self._playlist_sources = {}
         self._entries = []
 
         self._db.entry_delete_by_type(self._entry_type)
@@ -816,7 +1080,7 @@ class AmpacheBrowser(RB.BrowserSource):
             # SIGSEGV in rb_entry_view_have_selection.  Since entries are
             # registered with save_to_disk=False they never persist to disk,
             # so skipping this call is safe on exit.
-            self._playlist_sources = []
+            self._playlist_sources = {}
             self._entries = []
 
         RB.BrowserSource.do_delete_thyself(self)

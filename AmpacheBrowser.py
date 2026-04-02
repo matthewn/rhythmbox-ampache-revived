@@ -713,7 +713,6 @@ class AmpacheBrowser(RB.BrowserSource):
 
         # Source is activated
         def do_activate(self):
-                # activate source if inactive
                 if not self._activated:
                         self._activated = True
 
@@ -721,7 +720,6 @@ class AmpacheBrowser(RB.BrowserSource):
                         self._db = self._shell.props.db
                         self._entry_type = self.props.entry_type
 
-                        # connect playing-song-changed signal
                         self._art_store = RB.ExtDB(name="album-art")
                         self._art_request = self._art_store.connect("request", self._album_art_requested)
 

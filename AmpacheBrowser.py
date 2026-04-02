@@ -25,9 +25,9 @@
 # along with the Rhythmbox Ampache plugin.  If not, see
 # <http://www.gnu.org/licenses/>.
 
-from gi.repository import RB
 import gi
 gi.require_version('Soup', '3.0')
+from gi.repository import RB
 from gi.repository import GObject, Gtk, Gio, GLib, Soup
 
 import faulthandler
@@ -39,11 +39,11 @@ from datetime import datetime
 import re
 import hashlib
 import os
-import os.path
 import sys
 import collections
 
-import xml.sax, xml.sax.handler
+import xml.sax
+import xml.sax.handler
 
 class HandshakeHandler(xml.sax.handler.ContentHandler):
         def __init__(self, handshake):

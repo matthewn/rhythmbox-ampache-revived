@@ -437,7 +437,7 @@ class AmpacheBrowser(RB.BrowserSource):
                     parser.feed(contents)
                 except xml.sax.SAXParseException as e:
                     try:
-                        bad_line = contents.decode('utf-8').splitlines()[e.getLineNumber()]
+                        bad_line = contents.decode('utf-8').splitlines()[e.getLineNumber() - 1]
                     except (IndexError, UnicodeDecodeError):
                         bad_line = '<unavailable>'
                     print(f"error parsing songs: {e}: {bad_line}")

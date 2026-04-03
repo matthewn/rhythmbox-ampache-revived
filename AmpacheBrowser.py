@@ -1045,7 +1045,7 @@ class AmpacheBrowser(RB.BrowserSource):
     def _album_art_requested(self, store, key, last_time):
         artist = key.get_field('artist')
         album = key.get_field('album')
-        uri = self._albumart.get(artist + album)
+        uri = self._albumart.get((artist or '') + (album or ''))
         print(f'album art uri: {uri}')
         if uri:
             storekey = RB.ExtDBKey.create_storage('album', album)

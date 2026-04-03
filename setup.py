@@ -30,13 +30,13 @@ if '--no-glib-compile-schemas' in sys.argv:
 
 
 setup(
-    name='rhythmbox-ampache',
+    name='rhythmbox-ampache-revived',
     cmdclass={'install': PostInstall},
-    version='0.12',
+    version='2026.1',
     description='A Rhythmbox plugin to stream music from an Ampache server',
-    author='Rhythmbox Ampache plugin team',
-    author_email='rhythmbox-ampache@googlegroups.com',
-    url='https://github.com/lotan/rhythmbox-ampache',
+    author='Matthew Newton',
+    author_email='matthewn@mahnamahna.net',
+    url='https://github.com/matthewn/rhythmbox-ampache-revived',
     packages=[],
     data_files=[
         ('lib/rhythmbox/plugins/ampache', [

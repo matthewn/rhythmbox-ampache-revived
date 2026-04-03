@@ -31,8 +31,8 @@ import hashlib
 import os
 import re
 import sqlite3
-import sys
 import time
+import traceback
 import xml.sax
 import xml.sax.handler
 from datetime import datetime
@@ -47,6 +47,9 @@ faulthandler.enable()
 # _ is injected as a builtin by Rhythmbox's plugin loader at runtime.
 # This stub satisfies static analysers and degrades gracefully elsewhere.
 _ = str
+
+# Compiled once at import time; used by SongsHandler to rewrite auth tokens.
+_RE_AUTH = re.compile(r'\b(auth|ssid)=[a-fA-F0-9]*')
 
 # ---------------------------------------------------------------------------
 # SQLite schema and helpers
@@ -159,7 +162,7 @@ def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
                     albumart[song['artist'] + song['album']] = song['art']
 
         except Exception as e:  # This happens on duplicate uris being added
-            sys.excepthook(*sys.exc_info())
+            traceback.print_exc()
             print(f"Couldn't add {song['artist']} - {song['title']}", e)
 
 
@@ -171,6 +174,7 @@ class HandshakeHandler(xml.sax.handler.ContentHandler):
     def __init__(self, handshake):
         super().__init__()
         self._handshake = handshake
+        self._text = ''
 
     def startElement(self, name, attrs):
         self._text = ''
@@ -187,6 +191,12 @@ class PlaylistsHandler(xml.sax.handler.ContentHandler):
         super().__init__()
         self._playlists = playlists
         self._user = user
+        self._id = ''
+        self._name = ''
+        self._items = 0
+        self._owner = ''
+        self._type = ''
+        self._text = ''
 
     def startElement(self, name, attrs):
         if name == 'playlist':
@@ -230,7 +240,6 @@ class SongsHandler(xml.sax.handler.ContentHandler):
     def __init__(self, auth):
         super().__init__()
         self._auth = auth
-        self._re_auth = re.compile(r'\b(auth|ssid)=[a-fA-F0-9]*')
         self.songs = []
         self.albumart = {}
         self._default()
@@ -265,7 +274,7 @@ class SongsHandler(xml.sax.handler.ContentHandler):
         elif self._text:
             if name == 'url':
                 if self._auth:  # replace ssid/auth string with new auth string
-                    self._text = re.sub(self._re_auth, r'\1=' + self._auth, self._text)
+                    self._text = re.sub(_RE_AUTH, r'\1=' + self._auth, self._text)
                 self._url = self._text
             elif name == 'artist':
                 self._artist = self._text
@@ -288,8 +297,10 @@ class SongsHandler(xml.sax.handler.ContentHandler):
             elif name == 'rating' and self._text.isdigit():
                 self._rating = int(self._text)
             elif name == 'art':
-                if self._auth:  # replace auth string with new auth string
-                    self._text = re.sub(self._re_auth, 'auth=' + self._auth, self._text)
+                if self._auth:
+                    # Art URLs only use auth=, not ssid=, so the replacement
+                    # is intentionally hardcoded to 'auth=' rather than r'\1='.
+                    self._text = re.sub(_RE_AUTH, 'auth=' + self._auth, self._text)
                 self._art = self._text
 
     def characters(self, content):
@@ -425,8 +436,11 @@ class AmpacheBrowser(RB.BrowserSource):
                 try:
                     parser.feed(contents)
                 except xml.sax.SAXParseException as e:
-                    print(f"error parsing songs: {e}: "
-                        f"{contents.decode('utf-8').splitlines()[e.getLineNumber()]}")
+                    try:
+                        bad_line = contents.decode('utf-8').splitlines()[e.getLineNumber()]
+                    except (IndexError, UnicodeDecodeError):
+                        bad_line = '<unavailable>'
+                    print(f"error parsing songs: {e}: {bad_line}")
 
                 # Write parsed songs to RhythmDB
                 songs_to_rhythmdb(
@@ -530,6 +544,7 @@ class AmpacheBrowser(RB.BrowserSource):
                     self._shell.props.display_page_model.refilter()
 
             except Exception as e:
+                traceback.print_exc()
                 print(f'Exception: {e}')
                 return
 
@@ -640,12 +655,12 @@ class AmpacheBrowser(RB.BrowserSource):
             # Fires one chunk at a time, stopping when the response is smaller than
             # the limit (no need to know the total count upfront).
             def fetch_songs_sequential(uri_base, on_done):
-                offset = [0]
+                offset = 0
                 all_songs = []
                 all_albumart = {}
 
                 def fetch_one():
-                    chunk_uri = f"{uri_base}&offset={offset[0]}&limit={self._limit}"
+                    chunk_uri = f"{uri_base}&offset={offset}&limit={self._limit}"
                     cancel = Gio.Cancellable()
                     self._cancellables.add(cancel)
                     self._session.send_and_read_async(
@@ -654,6 +669,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         cancel, chunk_cb, cancel)
 
                 def chunk_cb(session_obj, result, cancel):
+                    nonlocal offset
                     self._cancellables.discard(cancel)
                     if not self._activated:
                         return
@@ -674,7 +690,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
                     all_songs.extend(handler.songs)
                     all_albumart.update(handler.albumart)
-                    offset[0] += self._limit
+                    offset += self._limit
 
                     if len(handler.songs) < self._limit:
                         on_done(all_songs, all_albumart)
@@ -879,21 +895,14 @@ class AmpacheBrowser(RB.BrowserSource):
             except xml.sax.SAXParseException as e:
                 print(f"error parsing handshake: {e}")
 
-            # convert handshake update time into datetime
-            handshake_update = datetime.strptime(
-                handshake['update'][0:19],
-                '%Y-%m-%dT%H:%M:%S')
-            self._handshake_newest = handshake_update
-            handshake_add = datetime.strptime(
-                handshake['add'][0:19],
-                '%Y-%m-%dT%H:%M:%S')
-            if handshake_add > self._handshake_newest:
-                self._handshake_newest = handshake_add
-            handshake_clean = datetime.strptime(
-                handshake['clean'][0:19],
-                '%Y-%m-%dT%H:%M:%S')
-            if handshake_clean > self._handshake_newest:
-                self._handshake_newest = handshake_clean
+            # find the most recent of the three server timestamps
+            def _parse_ts(s):
+                return datetime.strptime(s[0:19], '%Y-%m-%dT%H:%M:%S')
+            self._handshake_newest = max(
+                _parse_ts(handshake['update']),
+                _parse_ts(handshake['add']),
+                _parse_ts(handshake['clean']),
+            )
 
             self._handshake_auth = handshake['auth']
             self._handshake_songs = int(handshake['songs'])
@@ -973,7 +982,7 @@ class AmpacheBrowser(RB.BrowserSource):
             self._activated = False
             return
 
-        self._text = 'Update songs...'
+        self._text = 'Checking for updates...'
         self.notify_status_changed()
 
         handshake = {}
@@ -1024,6 +1033,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
             # create cache directory if it doesn't exist
             if not os.path.exists(self._cache_directory):
+                # 0o700: cache may contain auth tokens, so restrict to owner only
                 os.mkdir(self._cache_directory, 0o700)
 
             self.update(False)
@@ -1056,7 +1066,7 @@ class AmpacheBrowser(RB.BrowserSource):
         self._db.entry_delete_by_type(self._entry_type)
         self._db.commit()
 
-    def refetch_ampache(self, parameter, user_data):
+    def refetch_ampache(self, _parameter, _user_data):
         self.clean_db()
         self.update(True)
 

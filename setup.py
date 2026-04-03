@@ -16,14 +16,17 @@ class PostInstall(install):
         if glib_compile_schemas:
             schemas_dir = os.path.join(
                 self.install_base, 'share', 'glib-2.0', 'schemas')
-            subprocess.run(['glib-compile-schemas', schemas_dir], check=False)
+            result = subprocess.run(
+                ['glib-compile-schemas', schemas_dir], check=False)
+            if result.returncode != 0:
+                print(f"warning: glib-compile-schemas exited with code {result.returncode}")
 
 
 glib_compile_schemas = True
 
 if '--no-glib-compile-schemas' in sys.argv:
     glib_compile_schemas = False
-    sys.argv.remove('--no-glib-compile-schemas')
+    sys.argv = [a for a in sys.argv if a != '--no-glib-compile-schemas']
 
 
 setup(

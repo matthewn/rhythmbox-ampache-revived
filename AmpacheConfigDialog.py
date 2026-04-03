@@ -49,11 +49,19 @@ class AmpacheConfigDialog(GObject.Object, PeasGtk.Configurable):
         self.password.set_visibility(False)
         self.password.set_text(self.settings['password'])
 
-        self.url.connect('changed', self.url_changed_cb)
-        self.username.connect('changed', self.username_changed_cb)
-        self.password.connect('changed', self.password_changed_cb)
+        self._signal_pairs = [
+            (self.url, self.url.connect('changed', self.url_changed_cb)),
+            (self.username, self.username.connect('changed', self.username_changed_cb)),
+            (self.password, self.password.connect('changed', self.password_changed_cb)),
+        ]
+        self.config_dialog.connect('destroy', self._on_destroy)
 
         return self.config_dialog
+
+    def _on_destroy(self, widget):
+        for obj, hid in self._signal_pairs:
+            obj.disconnect(hid)
+        self._signal_pairs = []
 
     def url_changed_cb(self, widget):
         self.settings['url'] = self.url.get_text()

@@ -47,6 +47,7 @@ class AmpacheEntryType(RB.RhythmDBEntryType):
         return True
 
     def sync_metadata(self, entry, changes):
+        # Required interface method; Ampache streams are read-only, so no-op.
         return
 
 

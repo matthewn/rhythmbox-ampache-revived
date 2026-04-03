@@ -153,7 +153,9 @@ class TestPlaylistsHandler(unittest.TestCase):
         parse_xml(PlaylistsHandler(self.playlists, 'alice'), self.PLAYLISTS_XML)
 
     def _playlist(self, id_):
-        return next(p for p in self.playlists if p[0] == id_)
+        result = next((p for p in self.playlists if p[0] == id_), None)
+        self.assertIsNotNone(result, f"no playlist with id {id_!r}")
+        return result
 
     def test_own_private_playlist_included(self):
         self.assertIn('101', [p[0] for p in self.playlists])
@@ -717,12 +719,12 @@ class TestMeta(unittest.TestCase):
 
     def test_open_db_adds_meta_to_legacy_db(self):
         """Simulate a pre-meta-table database: _open_db must create the table."""
-        import sqlite3 as _sqlite3
+        import sqlite3
         fd, legacy_path = tempfile.mkstemp(suffix='.sqlite')
         os.close(fd)
         try:
             # Create a db with only the old tables (no meta)
-            legacy_conn = _sqlite3.connect(legacy_path)
+            legacy_conn = sqlite3.connect(legacy_path)
             legacy_conn.executescript("""
                 CREATE TABLE IF NOT EXISTS songs (url TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS playlists (id TEXT PRIMARY KEY, name TEXT NOT NULL);

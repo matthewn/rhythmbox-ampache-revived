@@ -1,40 +1,30 @@
-Rhythmbox Ampache Plugin
+# Rhythmbox Ampache Plugin (Revived!)
 
-= Disclaimer =
+Got an [Ampache](https://ampache.org/) server? Still using [Rhythmbox](https://gitlab.gnome.org/GNOME/rhythmbox)? Well, get 'em talking to each other! This plugin will do the trick.
 
-The original idea and code can be found here
+This is a **vibe-coded** evolution of lotan's [rhythmbox-ampache](https://github.com/lotan/rhythmbox-ampache) plugin, which itself is descended from a project originally hosted on [Google Code](http://code.google.com/p/rhythmbox-ampache) back in the dark ages.
 
-   http://code.google.com/p/rhythmbox-ampache
+Changes since lotan's last release in 2023:
 
-However, development seemed to stop for Rhythmbox 3.
+* Plugin updated for compatibility with Rhythmbox 3.4.9.
+* Fix some songs missing in the UI.
+* Massively speed up fetching of remote library metadata.
+* Massively speed up reading local cache of library metadata by using sqlite for storage instead of a flat XML file.
+* Improve efficiency of metadata fetching when library is updated (fewer total re-fetches).
 
-I completely rewrote the plugin and contributed a branch.
-As I'm not one of owners I wasn't notified on new issues so I
-decided to maintain the plugin here.
+## Installation
 
-= Description =
+`$ python setup.py install`
 
-The Rhythmbox Ampache Plugin is a plugin for the music player
-Rhythmbox that enables browsing the metadata and streaming music
-from an Ampache media server.
+## Usage
 
-= Installation =
+On first run, enable the plugin in Rhythmbox's Preferences dialog, then click the "Preferences" button to provide:
 
-$ python setup.py install
-
-= Usage =
-
-On first run, the plugin needs to be configured in Rhythmbox via
-
-   Configuration/Plugins
-
-The Ampache plugin has the following Preferences:
-
-   Server URL
-   Username (optional)
-   Password (Key)
+* Server URL
+* Username
+* Password
 
 If the plugin doesn't work as intended, additional debug
 information can be acquired by running Rhythmbox in debug mode:
 
-$ rhythmbox -D ampache
+`$ rhythmbox -D ampache`

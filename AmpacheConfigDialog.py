@@ -24,6 +24,7 @@
 # along with the Rhythmbox Ampache plugin.  If not, see
 # <http://www.gnu.org/licenses/>.
 
+import os
 import rb
 from gi.repository import GObject, Gtk, Gio, PeasGtk
 
@@ -36,7 +37,9 @@ class AmpacheConfigDialog(GObject.Object, PeasGtk.Configurable):
 
         self.settings = Gio.Settings('org.gnome.rhythmbox.plugins.ampache')
         self.ui = Gtk.Builder()
-        self.ui.add_from_file(rb.find_plugin_file(self, 'ampache-prefs.ui'))
+        ui_file = rb.find_plugin_file(self, 'ampache-prefs.ui') or \
+            os.path.join(os.path.dirname(__file__), 'ampache-prefs.ui')
+        self.ui.add_from_file(ui_file)
         self.config_dialog = self.ui.get_object('config')
 
         self.url = self.ui.get_object("url_entry")

@@ -15,7 +15,7 @@ Changes since lotan's last release in 2023:
 ## Installation
 
 ```
-$ make install
+make install
 ```
 
 This copies the plugin files to `~/.local/share/rhythmbox/plugins/ampache/`, installs the GSettings schema to `~/.local/share/glib-2.0/schemas/`, and compiles it with `glib-compile-schemas`. To uninstall, run `make uninstall`.
@@ -32,5 +32,5 @@ If the plugin doesn't work as intended, additional debug
 information can be acquired by running Rhythmbox in debug mode:
 
 ```
-$ rhythmbox -D ampache
+rhythmbox -D ampache
 ```

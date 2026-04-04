@@ -42,21 +42,19 @@ class AmpacheConfigDialog(GObject.Object, PeasGtk.Configurable):
         self.ui.add_from_file(ui_file)
         self.config_dialog = self.ui.get_object('config')
 
-        self.url = self.ui.get_object("url_entry")
-        self.url.set_text(self.settings['url'])
-
-        self.username = self.ui.get_object("username_entry")
-        self.username.set_text(self.settings['username'])
-
-        self.password = self.ui.get_object("password_entry")
-        self.password.set_visibility(False)
-        self.password.set_text(self.settings['password'])
-
-        self._signal_pairs = [
-            (self.url, self.url.connect('changed', self.url_changed_cb)),
-            (self.username, self.username.connect('changed', self.username_changed_cb)),
-            (self.password, self.password.connect('changed', self.password_changed_cb)),
+        fields = [
+            ('url', 'url_entry', False),
+            ('username', 'username_entry', False),
+            ('password', 'password_entry', True),
         ]
+        self._signal_pairs = []
+        for key, widget_name, hide in fields:
+            w = self.ui.get_object(widget_name)
+            if hide:
+                w.set_visibility(False)
+            w.set_text(self.settings[key])
+            self._signal_pairs.append(
+                (w, w.connect('changed', self._on_entry_changed, key)))
         self.config_dialog.connect('destroy', self._on_destroy)
 
         return self.config_dialog
@@ -66,11 +64,5 @@ class AmpacheConfigDialog(GObject.Object, PeasGtk.Configurable):
             obj.disconnect(hid)
         self._signal_pairs = []
 
-    def url_changed_cb(self, widget):
-        self.settings['url'] = self.url.get_text()
-
-    def username_changed_cb(self, widget):
-        self.settings['username'] = self.username.get_text()
-
-    def password_changed_cb(self, widget):
-        self.settings['password'] = self.password.get_text()
+    def _on_entry_changed(self, widget, key):
+        self.settings[key] = widget.get_text()

@@ -63,7 +63,8 @@ def strip_auth(url):
 
 
 def inject_auth(url, auth):
-    """Return `url` with the auth/ssid token replaced by `auth`.
+    """
+    Return `url` with the auth/ssid token replaced by `auth`.
 
     When `auth` is falsy (e.g. the handshake hasn't completed yet), the URL
     is returned unchanged — the caller will see the stripped placeholder and
@@ -158,7 +159,8 @@ def _show_error_dialog(message):
 
 def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
                       entries, update_existing=False, skip_lookup=False):
-    """Write a list of song dicts into RhythmDB (or a playlist source).
+    """
+    Write a list of song dicts into RhythmDB (or a playlist source).
 
     When update_existing is True, metadata on already-known URLs is refreshed
     rather than skipped. This is used by the incremental update path.
@@ -229,7 +231,8 @@ def parse_handshake(contents):
 
 
 def parse_playlists(contents, user):
-    """Parse a playlists XML response into a list of Playlist namedtuples.
+    """
+    Parse a playlists XML response into a list of Playlist namedtuples.
 
     Only returns playlists owned by `user` or explicitly public.
     """
@@ -327,11 +330,48 @@ class AmpacheBrowser(RB.BrowserSource):
         self._handshake_auth = None
         self._handshake_newest = None
         self._handshake_songs = None
+        self._handshake_add = ''
+        self._handshake_update = ''
+        self._handshake_clean = ''
 
         self._text = None
         self._busy = False
 
         self._activated = False
+        self._force_download = False
+        self._cache_loaded = False
+
+        # SQLite connection for the active update cycle. Opened by either
+        # the full-refetch or the incremental path; closed when that path
+        # finishes sealing the cache.
+        self._conn = None
+
+        # Per-chunk state for the parallel full-refetch fetcher. Set by
+        # _download_library_or_playlist(), mutated by _on_download_chunk().
+        self._chunk_offsets = []
+        self._chunk_remaining = 0
+        self._chunk_songs_loaded = 0
+        self._chunk_aborted = False
+        self._chunk_items = 0
+        self._chunk_is_playlist = False
+        self._chunk_source = None
+        self._chunk_playlist_id = None
+        self._chunk_playlist_name = ''
+
+        # Per-call state for the sequential fetcher used by the incremental
+        # path. Set by _fetch_songs_sequential(), mutated by chunk callbacks.
+        self._seq_uri_base = ''
+        self._seq_offset = 0
+        self._seq_all_songs = []
+        self._seq_all_albumart = {}
+        self._seq_on_done = None
+
+        # Incremental-update state.
+        self._delta_fetch_queue = collections.deque()
+        self._delta_to_fetch = collections.deque()
+        self._delta_label = ''
+        self._incr_playlist = None
+        self._incr_playlist_source = None
 
         # add action RefetchAmpache and assign callback refetch_ampache
         app = Gio.Application.get_default()
@@ -351,6 +391,39 @@ class AmpacheBrowser(RB.BrowserSource):
             Soup.Message.new('GET', uri),
             GLib.PRIORITY_DEFAULT, cancel, callback, user_data)
 
+    def _api_url(self, action, auth=None, **params):
+        """
+        Build an Ampache API URL.
+
+        Defaults `auth` to the current session token (self._handshake_auth);
+        the handshake itself overrides this with the computed authkey or
+        the configured API key.
+        """
+        if auth is None:
+            auth = self._handshake_auth
+        parts = [f"action={action}", f"auth={auth}"]
+        parts.extend(f"{k}={v}" for k, v in params.items())
+        return f"{self._settings['url']}{_API_PATH}?{'&'.join(parts)}"
+
+    def _parse_or_log(self, parse_fn, contents, label, default=None, **kwargs):
+        """
+        Call `parse_fn(contents, **kwargs)`; on ET.ParseError, log + return default.
+
+        On error, the offending source line is included in the log message
+        when the parser exception carries position info.
+        """
+        try:
+            return parse_fn(contents, **kwargs)
+        except ET.ParseError as exc:
+            bad_line = '<unavailable>'
+            if hasattr(exc, 'position'):
+                try:
+                    bad_line = contents.decode('utf-8').splitlines()[exc.position[0] - 1]
+                except (IndexError, UnicodeDecodeError):
+                    pass
+            print(f"error parsing {label}: {exc}: {bad_line}")
+            return default
+
     def _create_playlist_source(self, pid, name):
         source = GObject.new(
             AmpachePlaylist,
@@ -363,507 +436,16 @@ class AmpacheBrowser(RB.BrowserSource):
         return source
 
     def update(self, force_download):
-
-        # Reset the playlist queue for this update cycle. Without this,
-        # any un-consumed entry left from a previous cycle would accumulate
-        # across calls and cause songs to be fetched multiple times.
-        self._playlists = collections.deque([Playlist(0, 'library', 0)])
-
-        # download songs from Ampache server
-
-        # conn is opened in playlists_cb (when we know a full download is needed)
-        # and closed in download_iterate (when the queue is exhausted).
-        conn = None
-
-        def download_songs(uri, items, is_playlist, source, playlist_id, playlist_name):
-
-            if items <= 0:
-                self._set_status(None, False)
-                download_iterate()
-                return
-
-            # Calculate all chunk offsets up front so we can fire
-            # all requests simultaneously rather than sequentially.
-            offsets = list(range(0, items, self._limit))
-            remaining = len(offsets)
-            songs_loaded = 0
-            aborted = False
-
-            self._set_status(f'Fetching {playlist_name}... (0 / {items} songs)', True)
-
-            def songs_downloaded_cb(session_obj, result, user_data):
-                nonlocal aborted, remaining, songs_loaded
-                cancel, chunk_index = user_data
-                self._cancellables.discard(cancel)
-                # Always call finish() to free the GLib result, even
-                # when cancelled or when we intend to discard the data.
-                try:
-                    contents = session_obj.send_and_read_finish(result).get_data()
-                except Exception as e:
-                    if self._activated and not aborted:
-                        aborted = True
-                        _show_error_dialog(_('Songs response: %s') % e)
-                        self._activated = False
-                        self._set_status(None, False)
-                    return
-                if aborted or not self._activated:
-                    return
-
-                print(f"parse chunk {playlist_name}[{offsets[chunk_index]}]...")
-                try:
-                    songs, albumart = parse_songs(contents)
-                except ET.ParseError as exc:
-                    songs, albumart = [], {}
-                    try:
-                        bad_line = contents.decode('utf-8').splitlines()[exc.position[0] - 1]
-                    except (IndexError, UnicodeDecodeError):
-                        bad_line = '<unavailable>'
-                    print(f"error parsing songs: {exc}: {bad_line}")
-
-                # Write parsed songs to RhythmDB. Full-refetch guarantees
-                # a fresh entry_type in RhythmDB (clean_db preceded this
-                # path), so entry_lookup_by_location is skippable.
-                songs_to_rhythmdb(
-                    songs, self._albumart,
-                    self._db, self._entry_type,
-                    is_playlist, source, self._entries,
-                    skip_lookup=True)
-                if not is_playlist:
-                    self._db.commit()
-                self._albumart.update(albumart)
-
-                # Write parsed songs to SQLite cache
-                if not is_playlist:
-                    conn.executemany(_INSERT_SONG_SQL, songs)
-                else:
-                    conn.executemany(
-                        _INSERT_PLAYLIST_SONG_SQL,
-                        [(playlist_id, song['url']) for song in songs])
-                conn.commit()
-
-                songs_loaded += min(self._limit, items - offsets[chunk_index])
-                self._set_status(
-                    f'Fetching {playlist_name}... ({min(songs_loaded, items)} / {items} songs)')
-
-                remaining -= 1
-                if remaining == 0:
-                    self._set_status(None, False)
-                    download_iterate()
-
-            # Fire all chunk requests in parallel via Soup so the
-            # per-host connection limit applies to our session, not GIO's.
-            for i, offset in enumerate(offsets):
-                chunk_uri = f"{uri}&offset={offset}&limit={self._limit}"
-                cancel = Gio.Cancellable()
-                self._async_get(cancel, chunk_uri, songs_downloaded_cb, (cancel, i))
-                print(f"download {playlist_name}[{offset}]: {chunk_uri}")
-
-        def download_iterate():
-            nonlocal conn
-            try:
-                if self._playlists:
-                    playlist = self._playlists.popleft()
-                    print(f'process playlist: {playlist.name}')
-                    if playlist.id == 0:
-                        download_songs(
-                            f"{self._settings['url']}{_API_PATH}"
-                            f"?action=songs&auth={self._handshake_auth}",
-                            self._handshake_songs,
-                            False, self, None, playlist.name)
-                    else:
-                        playlist_source = self._create_playlist_source(
-                            playlist.id, playlist.name)
-                        conn.execute(_INSERT_PLAYLIST_SQL,
-                                     (str(playlist.id), playlist.name))
-                        conn.commit()
-                        download_songs(
-                            f"{self._settings['url']}{_API_PATH}"
-                            f"?action=playlist_songs&filter={playlist.id}"
-                            f"&auth={self._handshake_auth}",
-                            playlist.items, True, playlist_source,
-                            str(playlist.id), playlist.name)
-
-                else:
-                    # All playlists downloaded — write meta, seal the cache, and finish.
-                    newest_time = int(time.mktime(self._handshake_newest.timetuple()))
-                    _write_meta(conn, 'last_add', handshake['add'])
-                    _write_meta(conn, 'last_update', handshake['update'])
-                    _write_meta(conn, 'last_clean', handshake['clean'])
-                    conn.commit()
-                    conn.close()
-                    conn = None
-                    # change modification time to newest time
-                    os.utime(self._db_filename, (newest_time, newest_time))
-                    print(f"wrote cache db: {self._db_filename}")
-                    print('no more playlists to process, refilter display page model')
-                    self._shell.props.display_page_model.refilter()
-
-            except Exception as e:
-                traceback.print_exc()
-                print(f'Exception: {e}')
-                return
-
-        def playlists_cb(session_obj, result, cancel):
-            nonlocal conn
-            self._cancellables.discard(cancel)
-            try:
-                contents = session_obj.send_and_read_finish(result).get_data()
-            except Exception as e:
-                if self._activated:
-                    _show_error_dialog(_('Playlists response: %s') % e)
-                    self._activated = False
-                return
-            if not self._activated:
-                return
-
-            if not contents:
-                _show_error_dialog(
-                    _("Playlists response size: 0\nCheck ampache server logs for cause."))
-                self._activated = False
-                self._set_status('')
-                return
-
-            try:
-                self._playlists.extend(
-                    parse_playlists(contents, self._settings['username']))
-            except ET.ParseError as exc:
-                print(f"error parsing playlists: {exc}")
-
-            # Open the cache database now that we know a download is needed.
-            conn = _open_db(self._db_filename)
-
-            download_iterate()
-
-        # load library from SQLite cache
-
-        def load_from_cache():
-            self._set_status('Loading from cache...', True)
-
-            try:
-                db_conn = _open_db(self._db_filename)
-
-                # Load main song library. Legacy caches may contain URLs
-                # with baked-in auth tokens; strip them so RhythmDB entry
-                # LOCATIONs are session-independent and match the stripped
-                # URLs produced by parse_songs() on subsequent deltas.
-                songs = [dict(row) for row in db_conn.execute('SELECT * FROM songs')]
-                for song in songs:
-                    song['url'] = strip_auth(song['url'])
-                    if song['art']:
-                        song['art'] = strip_auth(song['art'])
-                songs_to_rhythmdb(
-                    songs, self._albumart,
-                    self._db, self._entry_type,
-                    False, self, self._entries,
-                    skip_lookup=True)
-                self._db.commit()
-
-                # Load playlists
-                playlists = [dict(row) for row in db_conn.execute('SELECT * FROM playlists')]
-                for playlist in playlists:
-                    playlist_source = self._create_playlist_source(
-                        playlist['id'], playlist['name'])
-                    urls = [row[0] for row in db_conn.execute(
-                        'SELECT url FROM playlist_songs WHERE playlist_id = ?',
-                        (playlist['id'],))]
-                    for url in urls:
-                        playlist_source.add_location(strip_auth(url), -1)
-
-                db_conn.close()
-
-            except Exception as e:
-                print(f'error loading from cache: {e}')
-
-            self._set_status(None, False)
-            self._shell.props.display_page_model.refilter()
-
-        # incremental update (add or update timestamp changed)
-
-        def incremental_update(new_add, new_update, new_clean, stored_add, stored_update):
-            """Fetch only songs added/updated since the last sync, then diff playlists."""
-            _conn = _open_db(self._db_filename)
-
-            # Sequential chunk fetcher — used for both delta songs and playlist songs.
-            # Fires one chunk at a time, stopping when the response is smaller than
-            # the limit (no need to know the total count upfront).
-            def fetch_songs_sequential(uri_base, on_done):
-                offset = 0
-                all_songs = []
-                all_albumart = {}
-
-                def fetch_one():
-                    chunk_uri = f"{uri_base}&offset={offset}&limit={self._limit}"
-                    cancel = Gio.Cancellable()
-                    self._async_get(cancel, chunk_uri, chunk_cb, cancel)
-
-                def chunk_cb(session_obj, result, cancel):
-                    nonlocal offset
-                    self._cancellables.discard(cancel)
-                    if not self._activated:
-                        return
-                    try:
-                        contents = session_obj.send_and_read_finish(result).get_data()
-                    except Exception as e:
-                        print(f"incremental chunk error: {e}")
-                        on_done(all_songs, all_albumart)
-                        return
-
-                    try:
-                        songs, albumart = parse_songs(contents)
-                    except ET.ParseError as exc:
-                        songs, albumart = [], {}
-                        print(f"error parsing incremental songs: {exc}")
-
-                    all_songs.extend(songs)
-                    all_albumart.update(albumart)
-                    offset += self._limit
-
-                    if len(songs) < self._limit:
-                        on_done(all_songs, all_albumart)
-                    else:
-                        fetch_one()
-
-                fetch_one()
-
-            # Build the queue of delta-song fetches needed.
-            base = f"{self._settings['url']}{_API_PATH}"
-            auth = self._handshake_auth
-            fetch_queue = collections.deque()
-            if new_add != stored_add:
-                # Truncate to 19 chars (drop timezone suffix) for URL param
-                fetch_queue.append((
-                    f"{base}?action=songs&auth={auth}&add={stored_add[:19]}",
-                    'new songs'))
-            if new_update != stored_update:
-                fetch_queue.append((
-                    f"{base}?action=songs&auth={auth}&update={stored_update[:19]}",
-                    'updated songs'))
-
-            def run_next_delta():
-                if not fetch_queue:
-                    fetch_incremental_playlists()
-                    return
-                uri, label = fetch_queue.popleft()
-                self._set_status(f'Fetching {label}...')
-                print(f"incremental fetch: {uri}")
-
-                def on_songs_done(songs, albumart):
-                    print(f"incremental: {len(songs)} {label}")
-                    songs_to_rhythmdb(
-                        songs, self._albumart,
-                        self._db, self._entry_type,
-                        False, self, self._entries,
-                        update_existing=True)
-                    self._db.commit()
-                    self._albumart.update(albumart)
-                    _conn.executemany(_INSERT_SONG_SQL, songs)
-                    _conn.commit()
-                    run_next_delta()
-
-                fetch_songs_sequential(uri, on_songs_done)
-
-            def fetch_incremental_playlists():
-                cancel = Gio.Cancellable()
-                self._async_get(
-                    cancel,
-                    f"{self._settings['url']}{_API_PATH}"
-                    f"?action=playlists&auth={self._handshake_auth}",
-                    playlists_fetched_cb, cancel)
-
-            def playlists_fetched_cb(session_obj, result, cancel):
-                self._cancellables.discard(cancel)
-                if not self._activated:
-                    return
-                try:
-                    contents = session_obj.send_and_read_finish(result).get_data()
-                except Exception as e:
-                    print(f"incremental playlists error: {e}")
-                    finish_incremental()
-                    return
-
-                try:
-                    new_playlists_list = parse_playlists(
-                        contents, self._settings['username'])
-                except ET.ParseError as exc:
-                    new_playlists_list = []
-                    print(f"error parsing incremental playlists: {exc}")
-
-                # id → Playlist namedtuple
-                new_pl = {p.id: p for p in new_playlists_list}
-                stored_pl = {row['id']: row['name'] for row in
-                             _conn.execute('SELECT id, name FROM playlists')}
-
-                # Remove deleted playlists
-                for pid in list(stored_pl.keys()):
-                    if pid not in new_pl:
-                        src = self._playlist_sources.pop(pid, None)
-                        if src is not None:
-                            src.delete_thyself()
-                        _conn.execute('DELETE FROM playlists WHERE id = ?', (pid,))
-                        _conn.execute(
-                            'DELETE FROM playlist_songs WHERE playlist_id = ?', (pid,))
-
-                # Determine which playlists need a song re-fetch (new or name-changed)
-                to_fetch = collections.deque()
-                for pid, pl in new_pl.items():
-                    if pid not in stored_pl:
-                        # New playlist — create source
-                        self._create_playlist_source(pid, pl.name)
-                        _conn.execute(_INSERT_PLAYLIST_SQL, (pid, pl.name))
-                        to_fetch.append(pl)
-                    elif stored_pl[pid] != pl.name:
-                        # Name changed — update stored name, clear and re-fetch songs
-                        _conn.execute(_INSERT_PLAYLIST_SQL, (pid, pl.name))
-                        _conn.execute(
-                            'DELETE FROM playlist_songs WHERE playlist_id = ?', (pid,))
-                        to_fetch.append(pl)
-
-                _conn.commit()
-
-                def fetch_next_playlist():
-                    if not to_fetch:
-                        finish_incremental()
-                        return
-                    pl = to_fetch.popleft()
-                    source = self._playlist_sources.get(pl.id)
-                    if source is None:
-                        fetch_next_playlist()
-                        return
-                    pl_uri = (f"{self._settings['url']}{_API_PATH}"
-                              f"?action=playlist_songs&filter={pl.id}"
-                              f"&auth={self._handshake_auth}")
-
-                    def on_pl_songs_done(songs, albumart):
-                        songs_to_rhythmdb(
-                            songs, self._albumart,
-                            self._db, self._entry_type,
-                            True, source, self._entries)
-                        _conn.executemany(
-                            _INSERT_PLAYLIST_SONG_SQL,
-                            [(pl.id, s['url']) for s in songs])
-                        _conn.commit()
-                        fetch_next_playlist()
-
-                    fetch_songs_sequential(pl_uri, on_pl_songs_done)
-
-                fetch_next_playlist()
-
-            def finish_incremental():
-                nonlocal _conn
-                _write_meta(_conn, 'last_add', new_add)
-                _write_meta(_conn, 'last_update', new_update)
-                _write_meta(_conn, 'last_clean', new_clean)
-                _conn.commit()
-                newest_time = int(time.mktime(self._handshake_newest.timetuple()))
-                _conn.close()
-                _conn = None
-                os.utime(self._db_filename, (newest_time, newest_time))
-                print('incremental update complete')
-                self._set_status(None, False)
-                self._shell.props.display_page_model.refilter()
-
-            # Cache was already loaded in update() before the handshake.
-            self._set_status('Checking for library updates...', True)
-            run_next_delta()
-
-        def handshake_cb(session_obj, result, cancel):
-            self._cancellables.discard(cancel)
-            try:
-                contents = session_obj.send_and_read_finish(result).get_data()
-            except Exception as e:
-                if self._activated:
-                    _show_error_dialog(_('Handshake response: %s') % e)
-                    self._activated = False
-                return
-            if not self._activated:
-                return
-
-            if not contents:
-                _show_error_dialog(
-                    _("Handshake response size: 0\nCheck ampache server logs for cause."))
-                self._activated = False
-                self._set_status('')
-                return
-
-            try:
-                handshake.update(parse_handshake(contents))
-            except ET.ParseError as exc:
-                print(f"error parsing handshake: {exc}")
-
-            # find the most recent of the three server timestamps
-            self._handshake_newest = max(
-                datetime.strptime(s[0:19], '%Y-%m-%dT%H:%M:%S')
-                for s in (handshake['update'], handshake['add'], handshake['clean']))
-
-            self._handshake_auth = handshake['auth']
-            self._handshake_songs = int(handshake['songs'])
-
-            # Publish the fresh token to the entry type so its
-            # do_get_playback_uri override can stitch it into stripped URLs.
-            self._entry_type.set_auth(self._handshake_auth)
-
-            new_add = handshake['add']
-            new_update = handshake['update']
-            new_clean = handshake['clean']
-
-            # read cached data
-            stored_add = stored_update = stored_clean = None
-            stored_song_count = 0
-            if os.path.exists(self._db_filename):
-                _meta_conn = _open_db(self._db_filename)
-                stored_add = _read_meta(_meta_conn, 'last_add')
-                stored_update = _read_meta(_meta_conn, 'last_update')
-                stored_clean = _read_meta(_meta_conn, 'last_clean')
-                stored_song_count = _meta_conn.execute(
-                    'SELECT COUNT(*) FROM songs').fetchone()[0]
-                _meta_conn.close()
-
-            clean_removed_songs = (
-                new_clean != stored_clean and
-                self._handshake_songs < stored_song_count
-            )
-
-            # Decide what (if anything) to fetch/re-fetch from the server:
-            #   (a) full refetch  — clean actually removed songs, meta missing, or forced
-            #   (b) incremental   — add or update timestamp changed
-            #   (c) load cache    — add and update timestamps both unchanged
-            needs_full = (
-                force_download or
-                not os.path.exists(self._db_filename) or
-                stored_clean is None or stored_add is None or stored_update is None or
-                clean_removed_songs
-            )
-
-            if needs_full:
-                # If we pre-loaded the cache, wipe the stale entries — the
-                # server has deleted songs and we don't know which URLs.
-                if cache_loaded:
-                    self.clean_db()
-
-                # delete the old cache database
-                try:
-                    if os.path.exists(self._db_filename):
-                        print(f"remove cache db: {self._db_filename}")
-                        os.unlink(self._db_filename)
-                except Exception as e:
-                    print(e)
-
-                # download playlists
-                uri = (f"{self._settings['url']}{_API_PATH}"
-                       f"?action=playlists&auth={self._handshake_auth}")
-                cancel = Gio.Cancellable()
-                self._async_get(cancel, uri, playlists_cb, cancel)
-                print(f"downloading playlists: {uri}")
-
-            elif new_add == stored_add and new_update == stored_update:
-                # Cache already loaded at update() start; just clear status.
-                self._set_status(None, False)
-
-            else:
-                incremental_update(new_add, new_update, new_clean,
-                                   stored_add, stored_update)
-
-        # check for errors
+        """
+        Start a cache-reconciliation cycle.
+
+        Validates settings, optionally pre-loads the cached library so the
+        user isn't blocked on the handshake round-trip, then fires the
+        handshake. _on_handshake() picks one of three paths:
+          (a) full refetch  — clean actually removed songs, meta missing, or forced
+          (b) incremental   — add or update timestamp changed
+          (c) load cache    — add and update timestamps both unchanged
+        """
         if not self._settings['url']:
             _show_error_dialog(_('URL missing'))
             self._activated = False
@@ -874,40 +456,518 @@ class AmpacheBrowser(RB.BrowserSource):
             self._activated = False
             return
 
-        # Show cached library immediately so the user isn't blocked on the
-        # handshake round-trip. handshake_cb then reconciles: no-op if
-        # nothing changed, delta fetch if add/update advanced, or clean_db()
-        # + full refetch if the server deleted songs.
-        cache_loaded = False
+        self._force_download = force_download
+
+        # Reset the playlist queue for this update cycle. Without this,
+        # any un-consumed entry left from a previous cycle would accumulate
+        # across calls and cause songs to be fetched multiple times.
+        self._playlists = collections.deque([Playlist(0, 'library', 0)])
+
+        self._cache_loaded = False
         if not force_download and os.path.exists(self._db_filename):
-            load_from_cache()
-            cache_loaded = True
+            self._load_from_cache()
+            self._cache_loaded = True
 
         self._set_status('Checking for updates...')
+        self._start_handshake()
 
-        handshake = {}
+    # ------------------------------------------------------------------
+    # Handshake
+    # ------------------------------------------------------------------
 
-        # build handshake url
+    def _start_handshake(self):
         if self._settings['username'] != '':
             # username/password provided
             timestamp = int(time.time())
             password = hashlib.sha256(self._settings['password'].encode('utf-8')).hexdigest()
             authkey = hashlib.sha256((str(timestamp) + password).encode('utf-8')).hexdigest()
-
-            ampache_server_uri = (
-                f"{self._settings['url']}{_API_PATH}"
-                f"?action=handshake&auth={authkey}&timestamp={timestamp}"
-                f"&user={self._settings['username']}&version=350001")
+            uri = self._api_url(
+                'handshake', auth=authkey, timestamp=timestamp,
+                user=self._settings['username'], version=350001)
         else:
             # api key provided
-            ampache_server_uri = (
-                f"{self._settings['url']}{_API_PATH}"
-                f"?action=handshake&auth={self._settings['password']}&version=350001")
-
-        # execute handshake
+            uri = self._api_url(
+                'handshake', auth=self._settings['password'], version=350001)
         cancel = Gio.Cancellable()
-        self._async_get(cancel, ampache_server_uri, handshake_cb, cancel)
-        print(f"downloading handshake: {ampache_server_uri}")
+        self._async_get(cancel, uri, self._on_handshake, cancel)
+        print(f"downloading handshake: {uri}")
+
+    def _on_handshake(self, session_obj, result, cancel):
+        self._cancellables.discard(cancel)
+        try:
+            contents = session_obj.send_and_read_finish(result).get_data()
+        except Exception as e:
+            if self._activated:
+                _show_error_dialog(_('Handshake response: %s') % e)
+                self._activated = False
+            return
+        if not self._activated:
+            return
+
+        if not contents:
+            _show_error_dialog(
+                _("Handshake response size: 0\nCheck ampache server logs for cause."))
+            self._activated = False
+            self._set_status('')
+            return
+
+        handshake = self._parse_or_log(
+            parse_handshake, contents, 'handshake', default={})
+
+        # find the most recent of the three server timestamps
+        self._handshake_newest = max(
+            datetime.strptime(s[0:19], '%Y-%m-%dT%H:%M:%S')
+            for s in (handshake['update'], handshake['add'], handshake['clean']))
+
+        self._handshake_auth = handshake['auth']
+        self._handshake_songs = int(handshake['songs'])
+        self._handshake_add = handshake['add']
+        self._handshake_update = handshake['update']
+        self._handshake_clean = handshake['clean']
+
+        # Publish the fresh token to the entry type so its
+        # do_get_playback_uri override can stitch it into stripped URLs.
+        self._entry_type.set_auth(self._handshake_auth)
+
+        # read cached meta
+        stored_add = stored_update = stored_clean = None
+        stored_song_count = 0
+        if os.path.exists(self._db_filename):
+            meta_conn = _open_db(self._db_filename)
+            stored_add = _read_meta(meta_conn, 'last_add')
+            stored_update = _read_meta(meta_conn, 'last_update')
+            stored_clean = _read_meta(meta_conn, 'last_clean')
+            stored_song_count = meta_conn.execute(
+                'SELECT COUNT(*) FROM songs').fetchone()[0]
+            meta_conn.close()
+
+        clean_removed_songs = (
+            self._handshake_clean != stored_clean and
+            self._handshake_songs < stored_song_count
+        )
+
+        needs_full = (
+            self._force_download or
+            not os.path.exists(self._db_filename) or
+            stored_clean is None or stored_add is None or stored_update is None or
+            clean_removed_songs
+        )
+
+        if needs_full:
+            # If we pre-loaded the cache, wipe the stale entries — the
+            # server has deleted songs and we don't know which URLs.
+            if self._cache_loaded:
+                self.clean_db()
+
+            # delete the old cache database
+            try:
+                if os.path.exists(self._db_filename):
+                    print(f"remove cache db: {self._db_filename}")
+                    os.unlink(self._db_filename)
+            except Exception as e:
+                print(e)
+
+            self._start_full_refetch()
+
+        elif self._handshake_add == stored_add and self._handshake_update == stored_update:
+            # Cache already loaded at update() start; just clear status.
+            self._set_status(None, False)
+
+        else:
+            self._start_incremental(stored_add, stored_update)
+
+    # ------------------------------------------------------------------
+    # Full-refetch path
+    # ------------------------------------------------------------------
+
+    def _start_full_refetch(self):
+        uri = self._api_url('playlists')
+        cancel = Gio.Cancellable()
+        self._async_get(cancel, uri, self._on_playlists_for_refetch, cancel)
+        print(f"downloading playlists: {uri}")
+
+    def _on_playlists_for_refetch(self, session_obj, result, cancel):
+        self._cancellables.discard(cancel)
+        try:
+            contents = session_obj.send_and_read_finish(result).get_data()
+        except Exception as e:
+            if self._activated:
+                _show_error_dialog(_('Playlists response: %s') % e)
+                self._activated = False
+            return
+        if not self._activated:
+            return
+
+        if not contents:
+            _show_error_dialog(
+                _("Playlists response size: 0\nCheck ampache server logs for cause."))
+            self._activated = False
+            self._set_status('')
+            return
+
+        self._playlists.extend(self._parse_or_log(
+            parse_playlists, contents, 'playlists', default=[],
+            user=self._settings['username']))
+
+        # Open the cache database now that we know a download is needed.
+        self._conn = _open_db(self._db_filename)
+        self._advance_download_queue()
+
+    def _advance_download_queue(self):
+        """
+        Pop the next playlist off the queue and fetch its songs.
+        When the queue is empty, seal the cache and finish.
+        """
+        try:
+            if self._playlists:
+                playlist = self._playlists.popleft()
+                print(f'process playlist: {playlist.name}')
+                if playlist.id == 0:
+                    self._download_library_or_playlist(
+                        self._api_url('songs'),
+                        self._handshake_songs,
+                        False, self, None, playlist.name)
+                else:
+                    playlist_source = self._create_playlist_source(
+                        playlist.id, playlist.name)
+                    self._conn.execute(_INSERT_PLAYLIST_SQL,
+                                       (str(playlist.id), playlist.name))
+                    self._conn.commit()
+                    self._download_library_or_playlist(
+                        self._api_url('playlist_songs', filter=playlist.id),
+                        playlist.items, True, playlist_source,
+                        str(playlist.id), playlist.name)
+            else:
+                self._finish_full_refetch()
+        except Exception as e:
+            traceback.print_exc()
+            print(f'Exception: {e}')
+
+    def _finish_full_refetch(self):
+        # All playlists downloaded — write meta, seal the cache, and finish.
+        newest_time = int(time.mktime(self._handshake_newest.timetuple()))
+        _write_meta(self._conn, 'last_add', self._handshake_add)
+        _write_meta(self._conn, 'last_update', self._handshake_update)
+        _write_meta(self._conn, 'last_clean', self._handshake_clean)
+        self._conn.commit()
+        self._conn.close()
+        self._conn = None
+        # change modification time to newest time
+        os.utime(self._db_filename, (newest_time, newest_time))
+        print(f"wrote cache db: {self._db_filename}")
+        print('no more playlists to process, refilter display page model')
+        self._shell.props.display_page_model.refilter()
+
+    def _download_library_or_playlist(self, uri, items, is_playlist, source,
+                                      playlist_id, playlist_name):
+        """Fire all chunk requests for one library/playlist in parallel."""
+        if items <= 0:
+            self._set_status(None, False)
+            self._advance_download_queue()
+            return
+
+        # Calculate all chunk offsets up front so we can fire
+        # all requests simultaneously rather than sequentially.
+        self._chunk_offsets = list(range(0, items, self._limit))
+        self._chunk_remaining = len(self._chunk_offsets)
+        self._chunk_songs_loaded = 0
+        self._chunk_aborted = False
+        self._chunk_items = items
+        self._chunk_is_playlist = is_playlist
+        self._chunk_source = source
+        self._chunk_playlist_id = playlist_id
+        self._chunk_playlist_name = playlist_name
+
+        self._set_status(f'Fetching {playlist_name}... (0 / {items} songs)', True)
+
+        # Fire all chunk requests in parallel via Soup so the
+        # per-host connection limit applies to our session, not GIO's.
+        for i, offset in enumerate(self._chunk_offsets):
+            chunk_uri = f"{uri}&offset={offset}&limit={self._limit}"
+            cancel = Gio.Cancellable()
+            self._async_get(cancel, chunk_uri, self._on_download_chunk, (cancel, i))
+            print(f"download {playlist_name}[{offset}]: {chunk_uri}")
+
+    def _on_download_chunk(self, session_obj, result, user_data):
+        cancel, chunk_index = user_data
+        self._cancellables.discard(cancel)
+        # Always call finish() to free the GLib result, even
+        # when cancelled or when we intend to discard the data.
+        try:
+            contents = session_obj.send_and_read_finish(result).get_data()
+        except Exception as e:
+            if self._activated and not self._chunk_aborted:
+                self._chunk_aborted = True
+                _show_error_dialog(_('Songs response: %s') % e)
+                self._activated = False
+                self._set_status(None, False)
+            return
+        if self._chunk_aborted or not self._activated:
+            return
+
+        playlist_name = self._chunk_playlist_name
+        offset = self._chunk_offsets[chunk_index]
+        print(f"parse chunk {playlist_name}[{offset}]...")
+        songs, albumart = self._parse_or_log(
+            parse_songs, contents, 'songs', default=([], {}))
+
+        # Write parsed songs to RhythmDB. Full-refetch guarantees
+        # a fresh entry_type in RhythmDB (clean_db preceded this
+        # path), so entry_lookup_by_location is skippable.
+        songs_to_rhythmdb(
+            songs, self._albumart,
+            self._db, self._entry_type,
+            self._chunk_is_playlist, self._chunk_source, self._entries,
+            skip_lookup=True)
+        if not self._chunk_is_playlist:
+            self._db.commit()
+        self._albumart.update(albumart)
+
+        # Write parsed songs to SQLite cache
+        if not self._chunk_is_playlist:
+            self._conn.executemany(_INSERT_SONG_SQL, songs)
+        else:
+            self._conn.executemany(
+                _INSERT_PLAYLIST_SONG_SQL,
+                [(self._chunk_playlist_id, song['url']) for song in songs])
+        self._conn.commit()
+
+        self._chunk_songs_loaded += min(self._limit, self._chunk_items - offset)
+        loaded = min(self._chunk_songs_loaded, self._chunk_items)
+        self._set_status(
+            f'Fetching {playlist_name}... ({loaded} / {self._chunk_items} songs)')
+
+        self._chunk_remaining -= 1
+        if self._chunk_remaining == 0:
+            self._set_status(None, False)
+            self._advance_download_queue()
+
+    # ------------------------------------------------------------------
+    # Cache load
+    # ------------------------------------------------------------------
+
+    def _load_from_cache(self):
+        self._set_status('Loading from cache...', True)
+        try:
+            db_conn = _open_db(self._db_filename)
+
+            # Load main song library. Legacy caches may contain URLs
+            # with baked-in auth tokens; strip them so RhythmDB entry
+            # LOCATIONs are session-independent and match the stripped
+            # URLs produced by parse_songs() on subsequent deltas.
+            songs = [dict(row) for row in db_conn.execute('SELECT * FROM songs')]
+            for song in songs:
+                song['url'] = strip_auth(song['url'])
+                if song['art']:
+                    song['art'] = strip_auth(song['art'])
+            songs_to_rhythmdb(
+                songs, self._albumart,
+                self._db, self._entry_type,
+                False, self, self._entries,
+                skip_lookup=True)
+            self._db.commit()
+
+            # Load playlists
+            playlists = [dict(row) for row in db_conn.execute('SELECT * FROM playlists')]
+            for playlist in playlists:
+                playlist_source = self._create_playlist_source(
+                    playlist['id'], playlist['name'])
+                urls = [row[0] for row in db_conn.execute(
+                    'SELECT url FROM playlist_songs WHERE playlist_id = ?',
+                    (playlist['id'],))]
+                for url in urls:
+                    playlist_source.add_location(strip_auth(url), -1)
+
+            db_conn.close()
+        except Exception as e:
+            print(f'error loading from cache: {e}')
+
+        self._set_status(None, False)
+        self._shell.props.display_page_model.refilter()
+
+    # ------------------------------------------------------------------
+    # Incremental path
+    # ------------------------------------------------------------------
+
+    def _start_incremental(self, stored_add, stored_update):
+        """Fetch only songs added/updated since the last sync, then diff playlists."""
+        self._conn = _open_db(self._db_filename)
+
+        self._delta_fetch_queue = collections.deque()
+        if self._handshake_add != stored_add:
+            # Truncate to 19 chars (drop timezone suffix) for URL param
+            self._delta_fetch_queue.append((
+                self._api_url('songs', add=stored_add[:19]),
+                'new songs'))
+        if self._handshake_update != stored_update:
+            self._delta_fetch_queue.append((
+                self._api_url('songs', update=stored_update[:19]),
+                'updated songs'))
+
+        # Cache was already loaded in update() before the handshake.
+        self._set_status('Checking for library updates...', True)
+        self._run_next_delta()
+
+    def _run_next_delta(self):
+        if not self._delta_fetch_queue:
+            self._fetch_incremental_playlists()
+            return
+        uri, label = self._delta_fetch_queue.popleft()
+        self._delta_label = label
+        self._set_status(f'Fetching {label}...')
+        print(f"incremental fetch: {uri}")
+        self._fetch_songs_sequential(uri, self._on_delta_songs_done)
+
+    def _on_delta_songs_done(self, songs, albumart):
+        print(f"incremental: {len(songs)} {self._delta_label}")
+        songs_to_rhythmdb(
+            songs, self._albumart,
+            self._db, self._entry_type,
+            False, self, self._entries,
+            update_existing=True)
+        self._db.commit()
+        self._albumart.update(albumart)
+        self._conn.executemany(_INSERT_SONG_SQL, songs)
+        self._conn.commit()
+        self._run_next_delta()
+
+    def _fetch_incremental_playlists(self):
+        cancel = Gio.Cancellable()
+        self._async_get(
+            cancel, self._api_url('playlists'),
+            self._on_incremental_playlists, cancel)
+
+    def _on_incremental_playlists(self, session_obj, result, cancel):
+        self._cancellables.discard(cancel)
+        if not self._activated:
+            return
+        try:
+            contents = session_obj.send_and_read_finish(result).get_data()
+        except Exception as e:
+            print(f"incremental playlists error: {e}")
+            self._finish_incremental()
+            return
+
+        new_playlists_list = self._parse_or_log(
+            parse_playlists, contents, 'incremental playlists', default=[],
+            user=self._settings['username'])
+
+        # id → Playlist namedtuple
+        new_pl = {p.id: p for p in new_playlists_list}
+        stored_pl = {row['id']: row['name'] for row in
+                     self._conn.execute('SELECT id, name FROM playlists')}
+
+        # Remove deleted playlists
+        for pid in list(stored_pl.keys()):
+            if pid not in new_pl:
+                src = self._playlist_sources.pop(pid, None)
+                if src is not None:
+                    src.delete_thyself()
+                self._conn.execute('DELETE FROM playlists WHERE id = ?', (pid,))
+                self._conn.execute(
+                    'DELETE FROM playlist_songs WHERE playlist_id = ?', (pid,))
+
+        # Determine which playlists need a song re-fetch (new or name-changed)
+        self._delta_to_fetch = collections.deque()
+        for pid, pl in new_pl.items():
+            if pid not in stored_pl:
+                # New playlist — create source
+                self._create_playlist_source(pid, pl.name)
+                self._conn.execute(_INSERT_PLAYLIST_SQL, (pid, pl.name))
+                self._delta_to_fetch.append(pl)
+            elif stored_pl[pid] != pl.name:
+                # Name changed — update stored name, clear and re-fetch songs
+                self._conn.execute(_INSERT_PLAYLIST_SQL, (pid, pl.name))
+                self._conn.execute(
+                    'DELETE FROM playlist_songs WHERE playlist_id = ?', (pid,))
+                self._delta_to_fetch.append(pl)
+
+        self._conn.commit()
+        self._fetch_next_incremental_playlist()
+
+    def _fetch_next_incremental_playlist(self):
+        if not self._delta_to_fetch:
+            self._finish_incremental()
+            return
+        pl = self._delta_to_fetch.popleft()
+        source = self._playlist_sources.get(pl.id)
+        if source is None:
+            self._fetch_next_incremental_playlist()
+            return
+        self._incr_playlist = pl
+        self._incr_playlist_source = source
+        pl_uri = self._api_url('playlist_songs', filter=pl.id)
+        self._fetch_songs_sequential(
+            pl_uri, self._on_incremental_playlist_songs_done)
+
+    def _on_incremental_playlist_songs_done(self, songs, albumart):
+        pl = self._incr_playlist
+        source = self._incr_playlist_source
+        songs_to_rhythmdb(
+            songs, self._albumart,
+            self._db, self._entry_type,
+            True, source, self._entries)
+        self._conn.executemany(
+            _INSERT_PLAYLIST_SONG_SQL,
+            [(pl.id, s['url']) for s in songs])
+        self._conn.commit()
+        self._fetch_next_incremental_playlist()
+
+    def _finish_incremental(self):
+        _write_meta(self._conn, 'last_add', self._handshake_add)
+        _write_meta(self._conn, 'last_update', self._handshake_update)
+        _write_meta(self._conn, 'last_clean', self._handshake_clean)
+        self._conn.commit()
+        newest_time = int(time.mktime(self._handshake_newest.timetuple()))
+        self._conn.close()
+        self._conn = None
+        os.utime(self._db_filename, (newest_time, newest_time))
+        print('incremental update complete')
+        self._set_status(None, False)
+        self._shell.props.display_page_model.refilter()
+
+    # ------------------------------------------------------------------
+    # Sequential fetcher (used by the incremental path).
+    # Fires one chunk at a time, stopping when the response is smaller
+    # than the limit (no need to know the total count upfront).
+    # ------------------------------------------------------------------
+
+    def _fetch_songs_sequential(self, uri_base, on_done):
+        self._seq_uri_base = uri_base
+        self._seq_offset = 0
+        self._seq_all_songs = []
+        self._seq_all_albumart = {}
+        self._seq_on_done = on_done
+        self._fetch_next_sequential_chunk()
+
+    def _fetch_next_sequential_chunk(self):
+        chunk_uri = (f"{self._seq_uri_base}"
+                     f"&offset={self._seq_offset}&limit={self._limit}")
+        cancel = Gio.Cancellable()
+        self._async_get(cancel, chunk_uri, self._on_sequential_chunk, cancel)
+
+    def _on_sequential_chunk(self, session_obj, result, cancel):
+        self._cancellables.discard(cancel)
+        if not self._activated:
+            return
+        try:
+            contents = session_obj.send_and_read_finish(result).get_data()
+        except Exception as e:
+            print(f"incremental chunk error: {e}")
+            self._seq_on_done(self._seq_all_songs, self._seq_all_albumart)
+            return
+
+        songs, albumart = self._parse_or_log(
+            parse_songs, contents, 'incremental songs', default=([], {}))
+
+        self._seq_all_songs.extend(songs)
+        self._seq_all_albumart.update(albumart)
+        self._seq_offset += self._limit
+
+        if len(songs) < self._limit:
+            self._seq_on_done(self._seq_all_songs, self._seq_all_albumart)
+        else:
+            self._fetch_next_sequential_chunk()
 
     # Source is activated
     def do_activate(self):

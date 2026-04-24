@@ -720,9 +720,7 @@ class AmpacheBrowser(RB.BrowserSource):
                 self._set_status(None, False)
                 self._shell.props.display_page_model.refilter()
 
-            # Kick off: load existing cache into RhythmDB first so the
-            # user sees their library immediately, then fetch the delta.
-            load_from_cache()
+            # Cache was already loaded in update() before the handshake.
             self._set_status('Checking for library updates...', True)
             run_next_delta()
 
@@ -791,6 +789,11 @@ class AmpacheBrowser(RB.BrowserSource):
             )
 
             if needs_full:
+                # If we pre-loaded the cache, wipe the stale entries — the
+                # server has deleted songs and we don't know which URLs.
+                if cache_loaded:
+                    self.clean_db()
+
                 # delete the old cache database
                 try:
                     if os.path.exists(self._db_filename):
@@ -807,7 +810,8 @@ class AmpacheBrowser(RB.BrowserSource):
                 print(f"downloading playlists: {uri}")
 
             elif new_add == stored_add and new_update == stored_update:
-                load_from_cache()
+                # Cache already loaded at update() start; just clear status.
+                self._set_status(None, False)
 
             else:
                 incremental_update(new_add, new_update, new_clean,
@@ -823,6 +827,15 @@ class AmpacheBrowser(RB.BrowserSource):
             _show_error_dialog(_('Password missing'))
             self._activated = False
             return
+
+        # Show cached library immediately so the user isn't blocked on the
+        # handshake round-trip. handshake_cb then reconciles: no-op if
+        # nothing changed, delta fetch if add/update advanced, or clean_db()
+        # + full refetch if the server deleted songs.
+        cache_loaded = False
+        if not force_download and os.path.exists(self._db_filename):
+            load_from_cache()
+            cache_loaded = True
 
         self._set_status('Checking for updates...')
 

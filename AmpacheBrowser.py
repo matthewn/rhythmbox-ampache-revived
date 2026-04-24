@@ -618,7 +618,7 @@ class AmpacheBrowser(RB.BrowserSource):
             self._set_status(None, False)
             self._shell.props.display_page_model.refilter()
 
-        # incremental update (add/update timestamps changed, clean unchanged)
+        # incremental update (add or update timestamp changed)
 
         def incremental_update(new_add, new_update, new_clean, stored_add, stored_update):
             """Fetch only songs added/updated since the last sync, then diff playlists."""
@@ -843,24 +843,32 @@ class AmpacheBrowser(RB.BrowserSource):
             new_update = handshake['update']
             new_clean = handshake['clean']
 
-            # Read stored timestamps from the meta table (if the db exists)
+            # read cached data
             stored_add = stored_update = stored_clean = None
+            stored_song_count = 0
             if os.path.exists(self._db_filename):
                 _meta_conn = _open_db(self._db_filename)
                 stored_add = _read_meta(_meta_conn, 'last_add')
                 stored_update = _read_meta(_meta_conn, 'last_update')
                 stored_clean = _read_meta(_meta_conn, 'last_clean')
+                stored_song_count = _meta_conn.execute(
+                    'SELECT COUNT(*) FROM songs').fetchone()[0]
                 _meta_conn.close()
 
-            # Three-way decision:
-            #   (a) full refetch  — clean changed, meta missing, or forced
-            #   (b) incremental   — only add/update timestamps changed
-            #   (c) load cache    — nothing changed
+            clean_removed_songs = (
+                new_clean != stored_clean and
+                self._handshake_songs < stored_song_count
+            )
+
+            # Decide what (if anything) to fetch/re-fetch from the server:
+            #   (a) full refetch  — clean actually removed songs, meta missing, or forced
+            #   (b) incremental   — add or update timestamp changed
+            #   (c) load cache    — add and update timestamps both unchanged
             needs_full = (
                 force_download or
                 not os.path.exists(self._db_filename) or
                 stored_clean is None or stored_add is None or stored_update is None or
-                new_clean != stored_clean
+                clean_removed_songs
             )
 
             if needs_full:

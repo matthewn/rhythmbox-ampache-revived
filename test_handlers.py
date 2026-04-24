@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Unit tests for AmpacheBrowser SAX handlers, songs_to_rhythmdb(), and the
+Unit tests for AmpacheBrowser XML parsers, songs_to_rhythmdb(), and the
 SQLite cache roundtrip.
 
 Run with:
@@ -14,7 +14,6 @@ import os
 import sys
 import tempfile
 import unittest
-import xml.sax
 from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
@@ -47,27 +46,14 @@ sys.modules['gi.repository'] = _gi_repository
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from AmpacheBrowser import (  # noqa: E402
-    HandshakeHandler, PlaylistsHandler, SongsHandler,
+    parse_handshake, parse_playlists, parse_songs,
     songs_to_rhythmdb, _open_db, _read_meta, _write_meta,
     _INSERT_SONG_SQL, _INSERT_PLAYLIST_SQL, _INSERT_PLAYLIST_SONG_SQL,
 )
 
 
 # ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
-def parse_xml(handler, xml_string):
-    """Parse an XML string with the given SAX content handler."""
-    parser = xml.sax.make_parser()
-    parser.setContentHandler(handler)
-    if isinstance(xml_string, str):
-        xml_string = xml_string.encode('utf-8')
-    parser.feed(xml_string)
-
-
-# ---------------------------------------------------------------------------
-# HandshakeHandler
+# parse_handshake
 # ---------------------------------------------------------------------------
 
 class TestHandshakeHandler(unittest.TestCase):
@@ -87,8 +73,7 @@ class TestHandshakeHandler(unittest.TestCase):
 """
 
     def setUp(self):
-        self.handshake = {}
-        parse_xml(HandshakeHandler(self.handshake), self.HANDSHAKE_XML)
+        self.handshake = parse_handshake(self.HANDSHAKE_XML)
 
     def test_auth(self):
         self.assertEqual(self.handshake['auth'], 'abc123def456abc1')
@@ -108,18 +93,16 @@ class TestHandshakeHandler(unittest.TestCase):
     def test_api_version(self):
         self.assertEqual(self.handshake['api'], '5.6.1')
 
-    def test_multipart_text_node(self):
-        """SAX may split a text node across multiple characters() calls;
-        the value must be correctly reassembled."""
+    def test_long_text_node(self):
+        """A long text value must be correctly parsed (no multi-chunk splitting
+        artefacts as could happen with SAX)."""
         long_auth = 'abcdef' * 50
         xml = f'<?xml version="1.0"?><root><auth>{long_auth}</auth></root>'
-        handshake = {}
-        parse_xml(HandshakeHandler(handshake), xml)
-        self.assertEqual(handshake['auth'], long_auth)
+        self.assertEqual(parse_handshake(xml)['auth'], long_auth)
 
 
 # ---------------------------------------------------------------------------
-# PlaylistsHandler
+# parse_playlists
 # ---------------------------------------------------------------------------
 
 class TestPlaylistsHandler(unittest.TestCase):
@@ -149,8 +132,7 @@ class TestPlaylistsHandler(unittest.TestCase):
 """
 
     def setUp(self):
-        self.playlists = []
-        parse_xml(PlaylistsHandler(self.playlists, 'alice'), self.PLAYLISTS_XML)
+        self.playlists = parse_playlists(self.PLAYLISTS_XML, 'alice')
 
     def _playlist(self, id_):
         result = next((p for p in self.playlists if p[0] == id_), None)
@@ -189,14 +171,13 @@ class TestPlaylistsHandler(unittest.TestCase):
 <type>private</type>
 </playlist>
 </root>"""
-        playlists = []
-        parse_xml(PlaylistsHandler(playlists, 'alice'), xml)
-        # items should remain at default 0
+        playlists = parse_playlists(xml, 'alice')
+        # items should fall back to 0
         self.assertEqual(playlists[0][2], 0)
 
 
 # ---------------------------------------------------------------------------
-# SongsHandler
+# parse_songs
 # ---------------------------------------------------------------------------
 
 # Auth tokens must be hex strings to match the regex [a-fA-F0-9]*
@@ -232,66 +213,64 @@ SONGS_XML = f"""\
 class TestSongsHandler(unittest.TestCase):
 
     def setUp(self):
-        self.handler = SongsHandler(NEW_AUTH)
-        parse_xml(self.handler, SONGS_XML)
+        self.songs, self.albumart = parse_songs(SONGS_XML, NEW_AUTH)
 
     def test_two_songs_collected(self):
-        self.assertEqual(len(self.handler.songs), 2)
+        self.assertEqual(len(self.songs), 2)
 
     def test_title(self):
-        self.assertEqual(self.handler.songs[0]['title'], 'Test Song')
+        self.assertEqual(self.songs[0]['title'], 'Test Song')
 
     def test_artist(self):
-        self.assertEqual(self.handler.songs[0]['artist'], 'Test Artist')
+        self.assertEqual(self.songs[0]['artist'], 'Test Artist')
 
     def test_album(self):
-        self.assertEqual(self.handler.songs[0]['album'], 'Test Album')
+        self.assertEqual(self.songs[0]['album'], 'Test Album')
 
     def test_genre(self):
-        self.assertEqual(self.handler.songs[0]['tag'], 'Rock')
+        self.assertEqual(self.songs[0]['tag'], 'Rock')
 
     def test_track_number(self):
-        self.assertEqual(self.handler.songs[0]['track'], 3)
+        self.assertEqual(self.songs[0]['track'], 3)
 
     def test_year_stored_as_integer(self):
-        self.assertEqual(self.handler.songs[0]['year'], 2020)
+        self.assertEqual(self.songs[0]['year'], 2020)
 
     def test_duration(self):
-        self.assertEqual(self.handler.songs[0]['time'], 245)
+        self.assertEqual(self.songs[0]['time'], 245)
 
     def test_file_size(self):
-        self.assertEqual(self.handler.songs[0]['size'], 8192000)
+        self.assertEqual(self.songs[0]['size'], 8192000)
 
     def test_rating(self):
-        self.assertEqual(self.handler.songs[0]['rating'], 4)
+        self.assertEqual(self.songs[0]['rating'], 4)
 
     def test_auth_token_replaced_in_url(self):
-        url = self.handler.songs[0]['url']
+        url = self.songs[0]['url']
         self.assertIn(f'ssid={NEW_AUTH}', url)
         self.assertNotIn(OLD_AUTH, url)
 
     def test_auth_token_replaced_in_art(self):
-        art_url = self.handler.albumart.get('Test ArtistTest Album', '')
+        art_url = self.albumart.get('Test ArtistTest Album', '')
         self.assertIn(f'auth={NEW_AUTH}', art_url)
         self.assertNotIn(OLD_AUTH, art_url)
 
     def test_albumart_stored(self):
-        self.assertIn('Test ArtistTest Album', self.handler.albumart)
+        self.assertIn('Test ArtistTest Album', self.albumart)
 
     def test_empty_artist_stored_as_empty_string(self):
-        self.assertEqual(self.handler.songs[1]['artist'], '')
+        self.assertEqual(self.songs[1]['artist'], '')
 
     def test_empty_album_stored_as_empty_string(self):
-        self.assertEqual(self.handler.songs[1]['album'], '')
+        self.assertEqual(self.songs[1]['album'], '')
 
     def test_minimal_song_has_default_track(self):
-        self.assertEqual(self.handler.songs[1]['track'], -1)
+        self.assertEqual(self.songs[1]['track'], -1)
 
     def test_no_auth_leaves_url_unchanged(self):
         """With auth=None, URLs should pass through unmodified."""
-        handler = SongsHandler(None)
-        parse_xml(handler, SONGS_XML)
-        self.assertIn(OLD_AUTH, handler.songs[0]['url'])
+        songs, _ = parse_songs(SONGS_XML, None)
+        self.assertIn(OLD_AUTH, songs[0]['url'])
 
     def test_year_out_of_range_ignored(self):
         xml = """\
@@ -303,36 +282,32 @@ class TestSongsHandler(unittest.TestCase):
 <year>0</year>
 </song>
 </root>"""
-        handler = SongsHandler(None)
-        parse_xml(handler, xml)
-        self.assertEqual(handler.songs[0]['year'], -1)
+        songs, _ = parse_songs(xml, None)
+        self.assertEqual(songs[0]['year'], -1)
 
     def test_year_boundary_min(self):
         xml = ('<?xml version="1.0"?><root><song id="1">'
                '<title>Min Year</title>'
                '<url>http://example.com/min.mp3</url>'
                '<year>1</year></song></root>')
-        handler = SongsHandler(None)
-        parse_xml(handler, xml)
-        self.assertEqual(handler.songs[0]['year'], 1)
+        songs, _ = parse_songs(xml, None)
+        self.assertEqual(songs[0]['year'], 1)
 
     def test_year_boundary_max(self):
         xml = ('<?xml version="1.0"?><root><song id="1">'
                '<title>Max Year</title>'
                '<url>http://example.com/max.mp3</url>'
                '<year>9999</year></song></root>')
-        handler = SongsHandler(None)
-        parse_xml(handler, xml)
-        self.assertEqual(handler.songs[0]['year'], 9999)
+        songs, _ = parse_songs(xml, None)
+        self.assertEqual(songs[0]['year'], 9999)
 
     def test_year_above_max_ignored(self):
         xml = ('<?xml version="1.0"?><root><song id="1">'
                '<title>Too High</title>'
                '<url>http://example.com/toohigh.mp3</url>'
                '<year>10000</year></song></root>')
-        handler = SongsHandler(None)
-        parse_xml(handler, xml)
-        self.assertEqual(handler.songs[0]['year'], -1)
+        songs, _ = parse_songs(xml, None)
+        self.assertEqual(songs[0]['year'], -1)
 
     def test_song_with_no_url_skipped(self):
         """A <song> element with no <url> child must not appear in songs."""
@@ -341,10 +316,9 @@ class TestSongsHandler(unittest.TestCase):
                '<song id="2"><title>Has URL</title>'
                '<url>http://example.com/ok.mp3</url></song>'
                '</root>')
-        handler = SongsHandler(None)
-        parse_xml(handler, xml)
-        self.assertEqual(len(handler.songs), 1)
-        self.assertEqual(handler.songs[0]['title'], 'Has URL')
+        songs, _ = parse_songs(xml, None)
+        self.assertEqual(len(songs), 1)
+        self.assertEqual(songs[0]['title'], 'Has URL')
 
 
 # ---------------------------------------------------------------------------

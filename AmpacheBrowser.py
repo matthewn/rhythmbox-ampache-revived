@@ -33,8 +33,7 @@ import re
 import sqlite3
 import time
 import traceback
-import xml.sax
-import xml.sax.handler
+import xml.etree.ElementTree as ET
 from datetime import datetime
 
 import gi
@@ -48,7 +47,7 @@ faulthandler.enable()
 # This stub satisfies static analysers and degrades gracefully elsewhere.
 _ = str
 
-# Compiled once at import time; used by SongsHandler to rewrite auth tokens.
+# Used by parse_songs() to rewrite auth tokens in song and art URLs.
 _RE_AUTH = re.compile(r'\b(auth|ssid)=[a-fA-F0-9]*')
 
 # Ampache XML API path, appended to the server base URL.
@@ -135,17 +134,6 @@ def _show_error_dialog(message):
     dlg.destroy()
 
 
-def _parse_xml(handler, contents):
-    """Parse XML bytes with handler; returns SAXParseException on error, else None."""
-    parser = xml.sax.make_parser()
-    parser.setContentHandler(handler)
-    try:
-        parser.feed(contents)
-    except xml.sax.SAXParseException as e:
-        return e
-    return None
-
-
 def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
                       entries, update_existing=False):
     """Write a list of song dicts into RhythmDB (or a playlist source).
@@ -194,152 +182,81 @@ def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
 
 
 # ---------------------------------------------------------------------------
-# SAX handlers (used to parse server responses during download)
+# XML parsing (server responses)
 # ---------------------------------------------------------------------------
-
-class HandshakeHandler(xml.sax.handler.ContentHandler):
-    def __init__(self, handshake):
-        super().__init__()
-        self._handshake = handshake
-        self._text = ''
-
-    def startElement(self, name, attrs):
-        self._text = ''
-
-    def endElement(self, name):
-        self._handshake[name] = self._text
-
-    def characters(self, content):
-        self._text = self._text + content
-
 
 Playlist = collections.namedtuple('Playlist', ['id', 'name', 'items'])
 
 
-class PlaylistsHandler(xml.sax.handler.ContentHandler):
-    def __init__(self, playlists, user):
-        super().__init__()
-        self._playlists = playlists
-        self._user = user
-        self._id = ''
-        self._name = ''
-        self._items = 0
-        self._owner = ''
-        self._type = ''
-        self._text = ''
-
-    def startElement(self, name, attrs):
-        if name == 'playlist':
-            self._id = attrs['id']
-            self._name = ''
-            self._items = 0
-            self._owner = ''
-            self._type = ''
-        self._text = ''
-
-    def endElement(self, name):
-        if name == 'playlist':
-            # only private playlists owned by this user, or public ones
-            if self._owner == self._user or self._type == 'public':
-                self._playlists.append(Playlist(self._id, self._name, self._items))
-        elif name == 'name':
-            self._name = self._text
-        elif name == 'items' and self._text.isdigit():
-            self._items = int(self._text)
-        elif name == 'owner':
-            self._owner = self._text
-        elif name == 'type':
-            self._type = self._text
-
-    def characters(self, content):
-        self._text = self._text + content
+def parse_handshake(contents):
+    """Parse a handshake XML response into a dict of child-tag → text."""
+    return {el.tag: (el.text or '') for el in ET.fromstring(contents)}
 
 
-class SongsHandler(xml.sax.handler.ContentHandler):
-    """Parse an Ampache songs XML response into a list of song dicts.
+def parse_playlists(contents, user):
+    """Parse a playlists XML response into a list of Playlist namedtuples.
 
-    After parsing, self.songs is a list of dicts with keys matching the
-    songs table columns, and self.albumart maps artist+album to art URL.
-    Year is stored as a raw integer (not Julian); conversion happens in
-    songs_to_rhythmdb() when writing to RhythmDB.
+    Only returns playlists owned by `user` or explicitly public.
     """
+    out = []
+    for pl in ET.fromstring(contents).findall('playlist'):
+        if pl.findtext('owner', '') != user and pl.findtext('type', '') != 'public':
+            continue
+        items = pl.findtext('items', '0')
+        out.append(Playlist(
+            pl.attrib['id'],
+            pl.findtext('name', ''),
+            int(items) if items.isdigit() else 0))
+    return out
 
-    def __init__(self, auth):
-        super().__init__()
-        self._auth = auth
-        self.songs = []
-        self.albumart = {}
-        self._default()
 
-    def startElement(self, name, attrs):
-        if name == 'song':
-            self._id = attrs['id']
-        self._text = ''
+def parse_songs(contents, auth):
+    """
+    Parse a songs XML response into (songs, albumart).
 
-    def endElement(self, name):
-        # Process the song container unconditionally; only guard field elements
-        # on self._text to avoid acting on empty/whitespace-only nodes.
-        if name == 'song':
-            if self._url:
-                self.songs.append({
-                    'url':    self._url,
-                    'artist': self._artist,
-                    'album':  self._album,
-                    'title':  self._title,
-                    'tag':    self._tag,
-                    'track':  self._track,
-                    'year':   self._year,
-                    'time':   self._time,
-                    'size':   self._size,
-                    'rating': self._rating,
-                    'art':    self._art,
-                })
-                if self._art:
-                    self.albumart[_album_key(self._artist, self._album)] = self._art
-            self._default()
+    songs is a list of dicts matching the songs table columns; albumart
+    maps artist+album to an art URL.  Year is stored as a raw integer;
+    conversion to Julian happens in songs_to_rhythmdb() when writing to
+    RhythmDB. If `auth` is truthy, url and art fields have their
+    auth/ssid tokens rewritten to the new auth value.
+    """
+    def int_or_default(el, name, default=-1):
+        t = el.findtext(name, '')
+        return int(t) if t.isdigit() else default
 
-        elif self._text:
-            if name == 'url':
-                if self._auth:  # replace ssid/auth string with new auth string
-                    self._text = re.sub(_RE_AUTH, r'\1=' + self._auth, self._text)
-                self._url = self._text
-            elif name == 'artist':
-                self._artist = self._text
-            elif name == 'album':
-                self._album = self._text
-            elif name == 'title':
-                self._title = self._text
-            elif name == 'tag':
-                self._tag = self._text
-            elif name == 'year' and self._text.isdigit():
-                year = int(self._text)
-                if 1 <= year <= 9999:
-                    self._year = year
-            elif name in ('track', 'time', 'size', 'rating') and self._text.isdigit():
-                setattr(self, f'_{name}', int(self._text))
-            elif name == 'art':
-                if self._auth:
-                    # Art URLs only use auth=, not ssid=, so the replacement
-                    # is intentionally hardcoded to 'auth=' rather than r'\1='.
-                    self._text = re.sub(_RE_AUTH, 'auth=' + self._auth, self._text)
-                self._art = self._text
-
-    def characters(self, content):
-        self._text = self._text + content
-
-    def _default(self):
-        self._id = -1
-        self._url = ''
-        self._artist = ''
-        self._album = ''
-        self._title = ''
-        self._tag = ''
-        self._track = -1
-        self._year = -1
-        self._time = -1
-        self._size = -1
-        self._rating = -1
-        self._art = ''
+    songs, albumart = [], {}
+    for s in ET.fromstring(contents).findall('song'):
+        url = s.findtext('url', '')
+        if not url:
+            continue
+        if auth:
+            url = _RE_AUTH.sub(r'\1=' + auth, url)
+        art = s.findtext('art', '')
+        if art and auth:
+            # Art URLs only use auth=, not ssid=, so the replacement
+            # is intentionally hardcoded to 'auth=' rather than r'\1='.
+            art = _RE_AUTH.sub('auth=' + auth, art)
+        year = int_or_default(s, 'year')
+        if not (1 <= year <= 9999):
+            year = -1
+        artist = s.findtext('artist', '')
+        album = s.findtext('album', '')
+        songs.append({
+            'url':    url,
+            'artist': artist,
+            'album':  album,
+            'title':  s.findtext('title', ''),
+            'tag':    s.findtext('tag', ''),
+            'track':  int_or_default(s, 'track'),
+            'year':   year,
+            'time':   int_or_default(s, 'time'),
+            'size':   int_or_default(s, 'size'),
+            'rating': int_or_default(s, 'rating'),
+            'art':    art,
+        })
+        if art:
+            albumart[_album_key(artist, album)] = art
+    return songs, albumart
 
 
 # ---------------------------------------------------------------------------
@@ -437,8 +354,7 @@ class AmpacheBrowser(RB.BrowserSource):
             # Calculate all chunk offsets up front so we can fire
             # all requests simultaneously rather than sequentially.
             offsets = list(range(0, items, self._limit))
-            num_chunks = len(offsets)
-            remaining = num_chunks
+            remaining = len(offsets)
             songs_loaded = 0
             aborted = False
 
@@ -463,31 +379,32 @@ class AmpacheBrowser(RB.BrowserSource):
                     return
 
                 print(f"parse chunk {playlist_name}[{offsets[chunk_index]}]...")
-                handler = SongsHandler(self._handshake_auth)
-                exc = _parse_xml(handler, contents)
-                if exc:
+                try:
+                    songs, albumart = parse_songs(contents, self._handshake_auth)
+                except ET.ParseError as exc:
+                    songs, albumart = [], {}
                     try:
-                        bad_line = contents.decode('utf-8').splitlines()[exc.getLineNumber() - 1]
+                        bad_line = contents.decode('utf-8').splitlines()[exc.position[0] - 1]
                     except (IndexError, UnicodeDecodeError):
                         bad_line = '<unavailable>'
                     print(f"error parsing songs: {exc}: {bad_line}")
 
                 # Write parsed songs to RhythmDB
                 songs_to_rhythmdb(
-                    handler.songs, self._albumart,
+                    songs, self._albumart,
                     self._db, self._entry_type,
                     is_playlist, source, self._entries)
                 if not is_playlist:
                     self._db.commit()
-                self._albumart.update(handler.albumart)
+                self._albumart.update(albumart)
 
                 # Write parsed songs to SQLite cache
                 if not is_playlist:
-                    conn.executemany(_INSERT_SONG_SQL, handler.songs)
+                    conn.executemany(_INSERT_SONG_SQL, songs)
                 else:
                     conn.executemany(
                         _INSERT_PLAYLIST_SONG_SQL,
-                        [(playlist_id, song['url']) for song in handler.songs])
+                        [(playlist_id, song['url']) for song in songs])
                 conn.commit()
 
                 songs_loaded += min(self._limit, items - offsets[chunk_index])
@@ -572,10 +489,10 @@ class AmpacheBrowser(RB.BrowserSource):
                 self._set_status('')
                 return
 
-            exc = _parse_xml(
-                PlaylistsHandler(self._playlists, self._settings['username']),
-                contents)
-            if exc:
+            try:
+                self._playlists.extend(
+                    parse_playlists(contents, self._settings['username']))
+            except ET.ParseError as exc:
                 print(f"error parsing playlists: {exc}")
 
             # Open the cache database now that we know a download is needed.
@@ -649,16 +566,17 @@ class AmpacheBrowser(RB.BrowserSource):
                         on_done(all_songs, all_albumart)
                         return
 
-                    handler = SongsHandler(self._handshake_auth)
-                    exc = _parse_xml(handler, contents)
-                    if exc:
+                    try:
+                        songs, albumart = parse_songs(contents, self._handshake_auth)
+                    except ET.ParseError as exc:
+                        songs, albumart = [], {}
                         print(f"error parsing incremental songs: {exc}")
 
-                    all_songs.extend(handler.songs)
-                    all_albumart.update(handler.albumart)
+                    all_songs.extend(songs)
+                    all_albumart.update(albumart)
                     offset += self._limit
 
-                    if len(handler.songs) < self._limit:
+                    if len(songs) < self._limit:
                         on_done(all_songs, all_albumart)
                     else:
                         fetch_one()
@@ -721,11 +639,11 @@ class AmpacheBrowser(RB.BrowserSource):
                     finish_incremental()
                     return
 
-                new_playlists_list = []
-                exc = _parse_xml(
-                    PlaylistsHandler(new_playlists_list, self._settings['username']),
-                    contents)
-                if exc:
+                try:
+                    new_playlists_list = parse_playlists(
+                        contents, self._settings['username'])
+                except ET.ParseError as exc:
+                    new_playlists_list = []
                     print(f"error parsing incremental playlists: {exc}")
 
                 # id → Playlist namedtuple
@@ -827,8 +745,9 @@ class AmpacheBrowser(RB.BrowserSource):
                 self._set_status('')
                 return
 
-            exc = _parse_xml(HandshakeHandler(handshake), contents)
-            if exc:
+            try:
+                handshake.update(parse_handshake(contents))
+            except ET.ParseError as exc:
                 print(f"error parsing handshake: {exc}")
 
             # find the most recent of the three server timestamps

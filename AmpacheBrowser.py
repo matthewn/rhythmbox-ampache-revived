@@ -135,16 +135,29 @@ def _show_error_dialog(message):
 
 
 def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
-                      entries, update_existing=False):
+                      entries, update_existing=False, skip_lookup=False):
     """Write a list of song dicts into RhythmDB (or a playlist source).
 
     When update_existing is True, metadata on already-known URLs is refreshed
     rather than skipped.  This is used by the incremental update path.
+
+    When skip_lookup is True, the per-URL entry_lookup_by_location() call is
+    bypassed — callers use this to promise that RhythmDB has no entries of
+    this entry_type yet, so the lookup would always return None.  If a URL
+    already exists (another plugin, unexpected state), RhythmDBEntry.new()
+    returns None and we skip the song.
     """
     for song in songs:
         try:
             if is_playlist:
                 source.add_location(song['url'], -1)
+                continue
+
+            if skip_lookup:
+                entry = RB.RhythmDBEntry.new(db, entry_type, song['url'])
+                if entry is None:
+                    continue
+                entries.append(entry)
             else:
                 entry = db.entry_lookup_by_location(song['url'])
                 if entry is None:
@@ -153,28 +166,28 @@ def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
                 elif not update_existing:
                     continue
 
-                if song['artist']:
-                    db.entry_set(entry, RB.RhythmDBPropType.ARTIST, song['artist'])
-                if song['album']:
-                    db.entry_set(entry, RB.RhythmDBPropType.ALBUM, song['album'])
-                if song['title']:
-                    db.entry_set(entry, RB.RhythmDBPropType.TITLE, song['title'])
-                if song['tag']:
-                    db.entry_set(entry, RB.RhythmDBPropType.GENRE, song['tag'])
-                if song['track'] != -1:
-                    db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, song['track'])
-                if song['year'] != -1:
-                    julian = GLib.Date.new_dmy(1, 1, song['year']).get_julian()
-                    db.entry_set(entry, RB.RhythmDBPropType.DATE, julian)
-                if song['time'] != -1:
-                    db.entry_set(entry, RB.RhythmDBPropType.DURATION, song['time'])
-                if song['size'] != -1:
-                    db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, song['size'])
-                if song['rating'] != -1:
-                    db.entry_set(entry, RB.RhythmDBPropType.RATING, song['rating'])
+            if song['artist']:
+                db.entry_set(entry, RB.RhythmDBPropType.ARTIST, song['artist'])
+            if song['album']:
+                db.entry_set(entry, RB.RhythmDBPropType.ALBUM, song['album'])
+            if song['title']:
+                db.entry_set(entry, RB.RhythmDBPropType.TITLE, song['title'])
+            if song['tag']:
+                db.entry_set(entry, RB.RhythmDBPropType.GENRE, song['tag'])
+            if song['track'] != -1:
+                db.entry_set(entry, RB.RhythmDBPropType.TRACK_NUMBER, song['track'])
+            if song['year'] != -1:
+                julian = GLib.Date.new_dmy(1, 1, song['year']).get_julian()
+                db.entry_set(entry, RB.RhythmDBPropType.DATE, julian)
+            if song['time'] != -1:
+                db.entry_set(entry, RB.RhythmDBPropType.DURATION, song['time'])
+            if song['size'] != -1:
+                db.entry_set(entry, RB.RhythmDBPropType.FILE_SIZE, song['size'])
+            if song['rating'] != -1:
+                db.entry_set(entry, RB.RhythmDBPropType.RATING, song['rating'])
 
-                if song['art']:
-                    albumart[_album_key(song['artist'], song['album'])] = song['art']
+            if song['art']:
+                albumart[_album_key(song['artist'], song['album'])] = song['art']
 
         except Exception as e:  # This happens on duplicate uris being added
             traceback.print_exc()
@@ -389,11 +402,14 @@ class AmpacheBrowser(RB.BrowserSource):
                         bad_line = '<unavailable>'
                     print(f"error parsing songs: {exc}: {bad_line}")
 
-                # Write parsed songs to RhythmDB
+                # Write parsed songs to RhythmDB.  Full-refetch guarantees
+                # a fresh entry_type in RhythmDB (clean_db preceded this
+                # path), so entry_lookup_by_location is skippable.
                 songs_to_rhythmdb(
                     songs, self._albumart,
                     self._db, self._entry_type,
-                    is_playlist, source, self._entries)
+                    is_playlist, source, self._entries,
+                    skip_lookup=True)
                 if not is_playlist:
                     self._db.commit()
                 self._albumart.update(albumart)
@@ -513,7 +529,8 @@ class AmpacheBrowser(RB.BrowserSource):
                 songs_to_rhythmdb(
                     songs, self._albumart,
                     self._db, self._entry_type,
-                    False, self, self._entries)
+                    False, self, self._entries,
+                    skip_lookup=True)
                 self._db.commit()
 
                 # Load playlists

@@ -47,11 +47,33 @@ faulthandler.enable()
 # This stub satisfies static analysers and degrades gracefully elsewhere.
 _ = str
 
-# Used by parse_songs() to rewrite auth tokens in song and art URLs.
+# Matches an auth/ssid query parameter (with any hex value, or empty). Used
+# by strip_auth() and inject_auth() to normalise stream/art URLs so they can
+# survive Ampache session expiry: stored URLs carry only 'ssid=' / 'auth=',
+# and the current session's token is stitched in at playback-request time.
 _RE_AUTH = re.compile(r'\b(auth|ssid)=[a-fA-F0-9]*')
 
 # Ampache XML API path, appended to the server base URL.
 _API_PATH = '/server/xml.server.php'
+
+
+def strip_auth(url):
+    """Return `url` with any auth/ssid token value removed (param name kept)."""
+    return _RE_AUTH.sub(r'\1=', url)
+
+
+def inject_auth(url, auth):
+    """Return `url` with the auth/ssid token replaced by `auth`.
+
+    When `auth` is falsy (e.g. the handshake hasn't completed yet), the URL
+    is returned unchanged — the caller will see the stripped placeholder and
+    playback will fail, which is the correct behaviour when we genuinely
+    have no session token to offer.
+    """
+    if not auth:
+        return url
+    return _RE_AUTH.sub(r'\1=' + auth, url)
+
 
 # ---------------------------------------------------------------------------
 # SQLite schema and helpers
@@ -139,11 +161,11 @@ def songs_to_rhythmdb(songs, albumart, db, entry_type, is_playlist, source,
     """Write a list of song dicts into RhythmDB (or a playlist source).
 
     When update_existing is True, metadata on already-known URLs is refreshed
-    rather than skipped.  This is used by the incremental update path.
+    rather than skipped. This is used by the incremental update path.
 
     When skip_lookup is True, the per-URL entry_lookup_by_location() call is
     bypassed — callers use this to promise that RhythmDB has no entries of
-    this entry_type yet, so the lookup would always return None.  If a URL
+    this entry_type yet, so the lookup would always return None. If a URL
     already exists (another plugin, unexpected state), RhythmDBEntry.new()
     returns None and we skip the song.
     """
@@ -223,15 +245,16 @@ def parse_playlists(contents, user):
     return out
 
 
-def parse_songs(contents, auth):
+def parse_songs(contents):
     """
     Parse a songs XML response into (songs, albumart).
 
     songs is a list of dicts matching the songs table columns; albumart
-    maps artist+album to an art URL.  Year is stored as a raw integer;
+    maps artist+album to an art URL. Year is stored as a raw integer;
     conversion to Julian happens in songs_to_rhythmdb() when writing to
-    RhythmDB. If `auth` is truthy, url and art fields have their
-    auth/ssid tokens rewritten to the new auth value.
+    RhythmDB. Auth tokens are stripped from url/art fields so stored URLs
+    are session-independent; AmpacheEntryType.do_get_playback_uri()
+    and _album_art_requested() inject the current session's token.
     """
     def int_or_default(el, name, default=-1):
         t = el.findtext(name, '')
@@ -242,13 +265,8 @@ def parse_songs(contents, auth):
         url = s.findtext('url', '')
         if not url:
             continue
-        if auth:
-            url = _RE_AUTH.sub(r'\1=' + auth, url)
-        art = s.findtext('art', '')
-        if art and auth:
-            # Art URLs only use auth=, not ssid=, so the replacement
-            # is intentionally hardcoded to 'auth=' rather than r'\1='.
-            art = _RE_AUTH.sub('auth=' + auth, art)
+        url = strip_auth(url)
+        art = strip_auth(s.findtext('art', ''))
         year = int_or_default(s, 'year')
         if not (1 <= year <= 9999):
             year = -1
@@ -346,7 +364,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
     def update(self, force_download):
 
-        # Reset the playlist queue for this update cycle.  Without this,
+        # Reset the playlist queue for this update cycle. Without this,
         # any un-consumed entry left from a previous cycle would accumulate
         # across calls and cause songs to be fetched multiple times.
         self._playlists = collections.deque([Playlist(0, 'library', 0)])
@@ -393,7 +411,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
                 print(f"parse chunk {playlist_name}[{offsets[chunk_index]}]...")
                 try:
-                    songs, albumart = parse_songs(contents, self._handshake_auth)
+                    songs, albumart = parse_songs(contents)
                 except ET.ParseError as exc:
                     songs, albumart = [], {}
                     try:
@@ -402,7 +420,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         bad_line = '<unavailable>'
                     print(f"error parsing songs: {exc}: {bad_line}")
 
-                # Write parsed songs to RhythmDB.  Full-refetch guarantees
+                # Write parsed songs to RhythmDB. Full-refetch guarantees
                 # a fresh entry_type in RhythmDB (clean_db preceded this
                 # path), so entry_lookup_by_location is skippable.
                 songs_to_rhythmdb(
@@ -524,8 +542,15 @@ class AmpacheBrowser(RB.BrowserSource):
             try:
                 db_conn = _open_db(self._db_filename)
 
-                # Load main song library
+                # Load main song library. Legacy caches may contain URLs
+                # with baked-in auth tokens; strip them so RhythmDB entry
+                # LOCATIONs are session-independent and match the stripped
+                # URLs produced by parse_songs() on subsequent deltas.
                 songs = [dict(row) for row in db_conn.execute('SELECT * FROM songs')]
+                for song in songs:
+                    song['url'] = strip_auth(song['url'])
+                    if song['art']:
+                        song['art'] = strip_auth(song['art'])
                 songs_to_rhythmdb(
                     songs, self._albumart,
                     self._db, self._entry_type,
@@ -542,7 +567,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         'SELECT url FROM playlist_songs WHERE playlist_id = ?',
                         (playlist['id'],))]
                     for url in urls:
-                        playlist_source.add_location(url, -1)
+                        playlist_source.add_location(strip_auth(url), -1)
 
                 db_conn.close()
 
@@ -584,7 +609,7 @@ class AmpacheBrowser(RB.BrowserSource):
                         return
 
                     try:
-                        songs, albumart = parse_songs(contents, self._handshake_auth)
+                        songs, albumart = parse_songs(contents)
                     except ET.ParseError as exc:
                         songs, albumart = [], {}
                         print(f"error parsing incremental songs: {exc}")
@@ -773,6 +798,10 @@ class AmpacheBrowser(RB.BrowserSource):
             self._handshake_auth = handshake['auth']
             self._handshake_songs = int(handshake['songs'])
 
+            # Publish the fresh token to the entry type so its
+            # do_get_playback_uri override can stitch it into stripped URLs.
+            self._entry_type.set_auth(self._handshake_auth)
+
             new_add = handshake['add']
             new_update = handshake['update']
             new_clean = handshake['clean']
@@ -894,7 +923,7 @@ class AmpacheBrowser(RB.BrowserSource):
 
             # create cache directory if it doesn't exist
             if not os.path.exists(self._cache_directory):
-                # 0o700: cache may contain auth tokens, so restrict to owner only
+                # 0o700: per-user cache, restrict to owner
                 os.mkdir(self._cache_directory, 0o700)
 
             self.update(False)
@@ -909,6 +938,10 @@ class AmpacheBrowser(RB.BrowserSource):
         uri = self._albumart.get(_album_key(artist or '', album or ''))
         print(f'album art uri: {uri}')
         if uri:
+            # albumart URLs are stored stripped; inject the current token
+            # so the server honours the fetch. ExtDB caches the returned
+            # image bytes, so this only matters on the first fetch.
+            uri = inject_auth(uri, self._handshake_auth)
             storekey = RB.ExtDBKey.create_storage('album', album)
             storekey.add_field('artist', artist)
             store.store_uri(storekey, RB.ExtDBSourceType.SEARCH, uri)
@@ -946,15 +979,15 @@ class AmpacheBrowser(RB.BrowserSource):
                 self._art_store.disconnect(self._art_request)
                 self._art_store = None
 
-            # Drop references.  Do NOT call playlist_source.delete_thyself()
+            # Drop references. Do NOT call playlist_source.delete_thyself()
             # here — Rhythmbox removes child display pages automatically when
             # the parent is deleted; doing it ourselves causes a double-free.
             #
-            # Do NOT call entry_delete_by_type here either.  It emits
+            # Do NOT call entry_delete_by_type here either. It emits
             # entry-deleted signals that Rhythmbox's rb_entry_view tries to
             # handle, but the entry view inside RBBrowserSource is already
             # invalid by the time do_delete_thyself is called, producing a
-            # SIGSEGV in rb_entry_view_have_selection.  Since entries are
+            # SIGSEGV in rb_entry_view_have_selection. Since entries are
             # registered with save_to_disk=False they never persist to disk,
             # so skipping this call is safe on exit.
             self._playlist_sources = {}

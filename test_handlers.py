@@ -47,7 +47,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from AmpacheBrowser import (  # noqa: E402
     parse_handshake, parse_playlists, parse_songs,
-    songs_to_rhythmdb, _open_db, _read_meta, _write_meta,
+    songs_to_rhythmdb, strip_auth, inject_auth,
+    _open_db, _read_meta, _write_meta,
     _INSERT_SONG_SQL, _INSERT_PLAYLIST_SQL, _INSERT_PLAYLIST_SONG_SQL,
 )
 
@@ -181,8 +182,9 @@ class TestPlaylistsHandler(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 # Auth tokens must be hex strings to match the regex [a-fA-F0-9]*
+# Token present in the test XML before parse_songs strips it.  parse_songs
+# must preserve the ssid=/auth= parameter name while dropping the value.
 OLD_AUTH = 'aabbccddeeff0011'
-NEW_AUTH = '1122334455667788'
 
 SONGS_XML = f"""\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -213,7 +215,7 @@ SONGS_XML = f"""\
 class TestSongsHandler(unittest.TestCase):
 
     def setUp(self):
-        self.songs, self.albumart = parse_songs(SONGS_XML, NEW_AUTH)
+        self.songs, self.albumart = parse_songs(SONGS_XML)
 
     def test_two_songs_collected(self):
         self.assertEqual(len(self.songs), 2)
@@ -245,14 +247,14 @@ class TestSongsHandler(unittest.TestCase):
     def test_rating(self):
         self.assertEqual(self.songs[0]['rating'], 4)
 
-    def test_auth_token_replaced_in_url(self):
+    def test_auth_stripped_from_url(self):
         url = self.songs[0]['url']
-        self.assertIn(f'ssid={NEW_AUTH}', url)
-        self.assertNotIn(OLD_AUTH, url)
+        self.assertIn('ssid=', url)           # param name preserved
+        self.assertNotIn(OLD_AUTH, url)       # token value removed
 
-    def test_auth_token_replaced_in_art(self):
+    def test_auth_stripped_from_art(self):
         art_url = self.albumart.get('Test ArtistTest Album', '')
-        self.assertIn(f'auth={NEW_AUTH}', art_url)
+        self.assertIn('auth=', art_url)
         self.assertNotIn(OLD_AUTH, art_url)
 
     def test_albumart_stored(self):
@@ -267,11 +269,6 @@ class TestSongsHandler(unittest.TestCase):
     def test_minimal_song_has_default_track(self):
         self.assertEqual(self.songs[1]['track'], -1)
 
-    def test_no_auth_leaves_url_unchanged(self):
-        """With auth=None, URLs should pass through unmodified."""
-        songs, _ = parse_songs(SONGS_XML, None)
-        self.assertIn(OLD_AUTH, songs[0]['url'])
-
     def test_year_out_of_range_ignored(self):
         xml = """\
 <?xml version="1.0"?>
@@ -282,7 +279,7 @@ class TestSongsHandler(unittest.TestCase):
 <year>0</year>
 </song>
 </root>"""
-        songs, _ = parse_songs(xml, None)
+        songs, _ = parse_songs(xml)
         self.assertEqual(songs[0]['year'], -1)
 
     def test_year_boundary_min(self):
@@ -290,7 +287,7 @@ class TestSongsHandler(unittest.TestCase):
                '<title>Min Year</title>'
                '<url>http://example.com/min.mp3</url>'
                '<year>1</year></song></root>')
-        songs, _ = parse_songs(xml, None)
+        songs, _ = parse_songs(xml)
         self.assertEqual(songs[0]['year'], 1)
 
     def test_year_boundary_max(self):
@@ -298,7 +295,7 @@ class TestSongsHandler(unittest.TestCase):
                '<title>Max Year</title>'
                '<url>http://example.com/max.mp3</url>'
                '<year>9999</year></song></root>')
-        songs, _ = parse_songs(xml, None)
+        songs, _ = parse_songs(xml)
         self.assertEqual(songs[0]['year'], 9999)
 
     def test_year_above_max_ignored(self):
@@ -306,7 +303,7 @@ class TestSongsHandler(unittest.TestCase):
                '<title>Too High</title>'
                '<url>http://example.com/toohigh.mp3</url>'
                '<year>10000</year></song></root>')
-        songs, _ = parse_songs(xml, None)
+        songs, _ = parse_songs(xml)
         self.assertEqual(songs[0]['year'], -1)
 
     def test_song_with_no_url_skipped(self):
@@ -316,9 +313,66 @@ class TestSongsHandler(unittest.TestCase):
                '<song id="2"><title>Has URL</title>'
                '<url>http://example.com/ok.mp3</url></song>'
                '</root>')
-        songs, _ = parse_songs(xml, None)
+        songs, _ = parse_songs(xml)
         self.assertEqual(len(songs), 1)
         self.assertEqual(songs[0]['title'], 'Has URL')
+
+
+# ---------------------------------------------------------------------------
+# strip_auth / inject_auth
+# ---------------------------------------------------------------------------
+
+class TestStripAuth(unittest.TestCase):
+
+    def test_strips_ssid_value(self):
+        self.assertEqual(
+            strip_auth('http://example.com/song.mp3?ssid=aabbccdd&type=song'),
+            'http://example.com/song.mp3?ssid=&type=song')
+
+    def test_strips_auth_value(self):
+        self.assertEqual(
+            strip_auth('http://example.com/art.jpg?auth=aabbccdd'),
+            'http://example.com/art.jpg?auth=')
+
+    def test_is_idempotent(self):
+        url = 'http://example.com/song.mp3?ssid=&type=song'
+        self.assertEqual(strip_auth(url), url)
+
+    def test_url_without_token_unchanged(self):
+        url = 'http://example.com/plain.mp3'
+        self.assertEqual(strip_auth(url), url)
+
+
+class TestInjectAuth(unittest.TestCase):
+
+    def test_injects_into_stripped_url(self):
+        self.assertEqual(
+            inject_auth('http://example.com/song.mp3?ssid=&type=song', 'newtok'),
+            'http://example.com/song.mp3?ssid=newtok&type=song')
+
+    def test_replaces_existing_token(self):
+        # Real Ampache tokens are hex, which is what _RE_AUTH matches.
+        self.assertEqual(
+            inject_auth('http://example.com/art.jpg?auth=aabbcc', 'ddeeff'),
+            'http://example.com/art.jpg?auth=ddeeff')
+
+    def test_preserves_parameter_name(self):
+        # ssid stays ssid, auth stays auth
+        self.assertEqual(
+            inject_auth('x?ssid=', 'T'), 'x?ssid=T')
+        self.assertEqual(
+            inject_auth('x?auth=', 'T'), 'x?auth=T')
+
+    def test_none_auth_returns_unchanged(self):
+        url = 'http://example.com/song.mp3?ssid=&type=song'
+        self.assertEqual(inject_auth(url, None), url)
+
+    def test_empty_auth_returns_unchanged(self):
+        url = 'http://example.com/song.mp3?ssid=&type=song'
+        self.assertEqual(inject_auth(url, ''), url)
+
+    def test_url_without_token_unchanged(self):
+        self.assertEqual(inject_auth('http://x/plain.mp3', 'T'), 'http://x/plain.mp3')
 
 
 # ---------------------------------------------------------------------------

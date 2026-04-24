@@ -30,7 +30,7 @@ from gi.repository import RB
 from gi.repository import GObject, Peas, Gtk, Gio, GdkPixbuf
 
 from AmpacheConfigDialog import AmpacheConfigDialog  # noqa: F401 (Peas discovers this class by name)
-from AmpacheBrowser import AmpacheBrowser
+from AmpacheBrowser import AmpacheBrowser, inject_auth
 
 # _ is injected as a builtin by Rhythmbox's plugin loader at runtime.
 _ = str
@@ -42,6 +42,12 @@ class AmpacheEntryType(RB.RhythmDBEntryType):
                 self,
                 name='AmpacheEntryType',
                 save_to_disk=False)
+        # Populated by AmpacheBrowser after each handshake; consulted by
+        # do_get_playback_uri() to inject a live token into stored URLs.
+        self._auth = None
+
+    def set_auth(self, auth):
+        self._auth = auth
 
     def can_sync_metadata(self, entry):
         return True
@@ -49,6 +55,14 @@ class AmpacheEntryType(RB.RhythmDBEntryType):
     def sync_metadata(self, entry, changes):
         # Required interface method; Ampache streams are read-only, so no-op.
         return
+
+    def do_get_playback_uri(self, entry):
+        # Stored LOCATION has no live auth token (see strip_auth).  Stitch
+        # in the current session's token so the server accepts the stream
+        # request.  Falls through to the stripped URL if the handshake
+        # hasn't completed yet — playback will fail, which is accurate.
+        location = entry.get_string(RB.RhythmDBPropType.LOCATION)
+        return inject_auth(location, self._auth)
 
 
 class Ampache(GObject.Object, Peas.Activatable):

@@ -1016,6 +1016,7 @@ class AmpacheBrowser(RB.BrowserSource):
             playlist_source.delete_thyself()
         self._playlist_sources = {}
         self._entries = []
+        self._albumart = {}
 
         self._db.entry_delete_by_type(self._entry_type)
         self._db.commit()

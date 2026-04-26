@@ -34,6 +34,7 @@ import sqlite3
 import time
 import traceback
 import xml.etree.ElementTree as ET
+from contextlib import closing
 from datetime import datetime
 
 import gi
@@ -298,8 +299,7 @@ def parse_songs(contents):
 # ---------------------------------------------------------------------------
 
 class AmpachePlaylist(RB.StaticPlaylistSource):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    pass
 
 
 GObject.type_register(AmpachePlaylist)
@@ -391,6 +391,31 @@ class AmpacheBrowser(RB.BrowserSource):
             Soup.Message.new('GET', uri),
             GLib.PRIORITY_DEFAULT, cancel, callback, user_data)
 
+    def _read_or_fail(self, session_obj, result, label):
+        """
+        Finish an async GET and return its bytes, or None on failure.
+
+        On exception or empty body, surface a fatal error dialog labelled
+        with `label` (e.g. 'Handshake', 'Playlists') and tear down the
+        update cycle. Returns None if the caller should stop.
+        """
+        try:
+            contents = session_obj.send_and_read_finish(result).get_data()
+        except Exception as e:
+            if self._activated:
+                _show_error_dialog(_('%s response: %s') % (label, e))
+                self._activated = False
+            return None
+        if not self._activated:
+            return None
+        if not contents:
+            _show_error_dialog(
+                _("%s response size: 0\nCheck ampache server logs for cause.") % label)
+            self._activated = False
+            self._set_status('')
+            return None
+        return contents
+
     def _api_url(self, action, auth=None, **params):
         """
         Build an Ampache API URL.
@@ -416,11 +441,10 @@ class AmpacheBrowser(RB.BrowserSource):
             return parse_fn(contents, **kwargs)
         except ET.ParseError as exc:
             bad_line = '<unavailable>'
-            if hasattr(exc, 'position'):
-                try:
-                    bad_line = contents.decode('utf-8').splitlines()[exc.position[0] - 1]
-                except (IndexError, UnicodeDecodeError):
-                    pass
+            try:
+                bad_line = contents.decode('utf-8').splitlines()[exc.position[0] - 1]
+            except (IndexError, UnicodeDecodeError):
+                pass
             print(f"error parsing {label}: {exc}: {bad_line}")
             return default
 
@@ -494,21 +518,8 @@ class AmpacheBrowser(RB.BrowserSource):
 
     def _on_handshake(self, session_obj, result, cancel):
         self._cancellables.discard(cancel)
-        try:
-            contents = session_obj.send_and_read_finish(result).get_data()
-        except Exception as e:
-            if self._activated:
-                _show_error_dialog(_('Handshake response: %s') % e)
-                self._activated = False
-            return
-        if not self._activated:
-            return
-
-        if not contents:
-            _show_error_dialog(
-                _("Handshake response size: 0\nCheck ampache server logs for cause."))
-            self._activated = False
-            self._set_status('')
+        contents = self._read_or_fail(session_obj, result, 'Handshake')
+        if contents is None:
             return
 
         handshake = self._parse_or_log(
@@ -533,13 +544,12 @@ class AmpacheBrowser(RB.BrowserSource):
         stored_add = stored_update = stored_clean = None
         stored_song_count = 0
         if os.path.exists(self._db_filename):
-            meta_conn = _open_db(self._db_filename)
-            stored_add = _read_meta(meta_conn, 'last_add')
-            stored_update = _read_meta(meta_conn, 'last_update')
-            stored_clean = _read_meta(meta_conn, 'last_clean')
-            stored_song_count = meta_conn.execute(
-                'SELECT COUNT(*) FROM songs').fetchone()[0]
-            meta_conn.close()
+            with closing(_open_db(self._db_filename)) as meta_conn:
+                stored_add = _read_meta(meta_conn, 'last_add')
+                stored_update = _read_meta(meta_conn, 'last_update')
+                stored_clean = _read_meta(meta_conn, 'last_clean')
+                stored_song_count = meta_conn.execute(
+                    'SELECT COUNT(*) FROM songs').fetchone()[0]
 
         clean_removed_songs = (
             self._handshake_clean != stored_clean and
@@ -547,10 +557,9 @@ class AmpacheBrowser(RB.BrowserSource):
         )
 
         needs_full = (
-            self._force_download or
-            not os.path.exists(self._db_filename) or
-            stored_clean is None or stored_add is None or stored_update is None or
-            clean_removed_songs
+            self._force_download
+            or None in (stored_add, stored_update, stored_clean)
+            or clean_removed_songs
         )
 
         if needs_full:
@@ -588,21 +597,8 @@ class AmpacheBrowser(RB.BrowserSource):
 
     def _on_playlists_for_refetch(self, session_obj, result, cancel):
         self._cancellables.discard(cancel)
-        try:
-            contents = session_obj.send_and_read_finish(result).get_data()
-        except Exception as e:
-            if self._activated:
-                _show_error_dialog(_('Playlists response: %s') % e)
-                self._activated = False
-            return
-        if not self._activated:
-            return
-
-        if not contents:
-            _show_error_dialog(
-                _("Playlists response size: 0\nCheck ampache server logs for cause."))
-            self._activated = False
-            self._set_status('')
+        contents = self._read_or_fail(session_obj, result, 'Playlists')
+        if contents is None:
             return
 
         self._playlists.extend(self._parse_or_log(
@@ -643,20 +639,22 @@ class AmpacheBrowser(RB.BrowserSource):
             traceback.print_exc()
             print(f'Exception: {e}')
 
-    def _finish_full_refetch(self):
-        # All playlists downloaded — write meta, seal the cache, and finish.
-        newest_time = int(time.mktime(self._handshake_newest.timetuple()))
+    def _seal_cache(self):
+        """Write handshake meta, close the SQLite cache, stamp its mtime, refilter."""
         _write_meta(self._conn, 'last_add', self._handshake_add)
         _write_meta(self._conn, 'last_update', self._handshake_update)
         _write_meta(self._conn, 'last_clean', self._handshake_clean)
         self._conn.commit()
         self._conn.close()
         self._conn = None
-        # change modification time to newest time
+        newest_time = int(time.mktime(self._handshake_newest.timetuple()))
         os.utime(self._db_filename, (newest_time, newest_time))
+        self._shell.props.display_page_model.refilter()
+
+    def _finish_full_refetch(self):
+        self._seal_cache()
         print(f"wrote cache db: {self._db_filename}")
         print('no more playlists to process, refilter display page model')
-        self._shell.props.display_page_model.refilter()
 
     def _download_library_or_playlist(self, uri, items, is_playlist, source,
                                       playlist_id, playlist_name):
@@ -914,17 +912,9 @@ class AmpacheBrowser(RB.BrowserSource):
         self._fetch_next_incremental_playlist()
 
     def _finish_incremental(self):
-        _write_meta(self._conn, 'last_add', self._handshake_add)
-        _write_meta(self._conn, 'last_update', self._handshake_update)
-        _write_meta(self._conn, 'last_clean', self._handshake_clean)
-        self._conn.commit()
-        newest_time = int(time.mktime(self._handshake_newest.timetuple()))
-        self._conn.close()
-        self._conn = None
-        os.utime(self._db_filename, (newest_time, newest_time))
+        self._seal_cache()
         print('incremental update complete')
         self._set_status(None, False)
-        self._shell.props.display_page_model.refilter()
 
     # ------------------------------------------------------------------
     # Sequential fetcher (used by the incremental path).

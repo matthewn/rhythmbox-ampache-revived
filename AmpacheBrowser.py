@@ -412,7 +412,25 @@ class AmpacheBrowser(RB.BrowserSource):
                 # 0o700: per-user cache, restrict to owner
                 os.mkdir(self._cache_directory, 0o700)
 
-            self.update(False)
+            # Defer the load via two chained idles. The first sets the
+            # busy status; the second runs update(). Without the chain,
+            # _load_from_cache()'s synchronous RhythmDB writes block the
+            # main loop before the post-click repaint, so the source
+            # highlight and status text don't appear until the load is
+            # already done. (Setting status synchronously in do_activate
+            # is too early — the source isn't yet "current" so the shell
+            # ignores the change.)
+            GLib.idle_add(self._idle_set_status)
+
+    def _idle_set_status(self):
+        if os.path.exists(self._db_filename):
+            self._set_status('Loading from cache...', True)
+        GLib.idle_add(self._idle_update)
+        return GLib.SOURCE_REMOVE
+
+    def _idle_update(self):
+        self.update(False)
+        return GLib.SOURCE_REMOVE
 
     # Shortcut for single click
     def do_selected(self):
